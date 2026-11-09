@@ -16,7 +16,7 @@ import threading
 import time
 
 NAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-RESERVED = {"mcp", "upload", "health", "api", "admin", "static", "assets"}
+RESERVED = {"mcp", "upload", "moderation", "health", "api", "admin", "static", "assets"}
 BAD_SEGMENT = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]')
 ADJECTIVES = """amber bold brave bright calm clever cosmic crisp dapper eager fancy gentle golden happy jolly keen
 lively lucky mellow merry nimble plucky quiet rapid rosy shiny snowy sunny swift tidy vivid witty""".split()
