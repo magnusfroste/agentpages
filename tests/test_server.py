@@ -28,6 +28,8 @@ opener = urllib.request.build_opener(NoRedirect)
 
 
 class Server(unittest.TestCase):
+    EXTRA = {}
+
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
@@ -36,7 +38,7 @@ class Server(unittest.TestCase):
             cls.port = s.getsockname()[1]
         cls.base = f"http://127.0.0.1:{cls.port}"
         env = {**os.environ, "DATA_DIR": cls.tmp.name, "PORT": str(cls.port), "MCP_KEYS": f"ada:{KEY},bob:{KEY2},short:abc",
-               "PUBLIC_URL": "https://pages.example.com", "MAX_SITE_MB": "1", "MAX_FILES": "5"}
+               "PUBLIC_URL": "https://pages.example.com", "MAX_SITE_MB": "1", "MAX_FILES": "5", **cls.EXTRA}
         cls.proc = subprocess.Popen([sys.executable, "server.py"], cwd=APP, env=env, stdout=subprocess.DEVNULL)
         for _ in range(100):
             try:
@@ -62,7 +64,8 @@ class Server(unittest.TestCase):
 
     def call(self, tool, args=None, key=KEY):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args or {}}}).encode()
-        req = urllib.request.Request(self.base + "/mcp", body, {"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json", **({"Authorization": f"Bearer {key}"} if key else {})}
+        req = urllib.request.Request(self.base + "/mcp", body, headers)
         with urllib.request.urlopen(req) as r:
             return json.load(r)["result"]
 
@@ -175,6 +178,14 @@ class Server(unittest.TestCase):
                 self.call("list_sites", key=key)
             self.assertEqual(e.exception.code, 401)
 
+    def test_no_key_is_refused_unless_in_danger_mode(self):
+        if self.EXTRA:
+            return
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            self.call("publish_site", {"html": "x"}, key=None)
+        self.assertEqual(e.exception.code, 401)
+        self.assertNotIn(b"Anyone can publish", self.http("/")[1])
+
     def test_mcp_handshake(self):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
         req = urllib.request.Request(self.base + "/mcp", body, {"Authorization": f"Bearer {KEY}"})
@@ -280,3 +291,77 @@ class Server(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DangerMode(Server):
+    """The same server with DANGER_MODE on: everything above still holds for keyed agents, and this is what changes."""
+    EXTRA = {"DANGER_MODE": "on", "DANGER_MAX_SITE_MB": "1", "DANGER_PUBLISHES_PER_HOUR": "1000", "TRUSTED_PROXY_HEADER": "X-Real-IP"}
+
+    def anon(self, tool, args=None):
+        return self.ok(tool, args, key=None)
+
+    def test_anyone_can_publish_and_gets_an_edit_token(self):
+        out = self.anon("publish_site", {"html": "<h1>open</h1>"})
+        self.assertGreaterEqual(len(out["edit_token"]), 20)
+        self.assertEqual(self.http(f"/{out['site']}/")[1], b"<h1>open</h1>")
+        self.assertIn(b"Anyone can publish", self.http("/")[1])
+
+    def test_only_the_edit_token_changes_it(self):
+        out = self.anon("publish_site", {"html": "one"})
+        s, token = out["site"], out["edit_token"]
+        self.assertIn("another agent", self.refused("publish_site", {"html": "vandal", "site": s}, key=None))
+        self.assertIn("another agent", self.refused("publish_site", {"html": "vandal", "site": s, "edit_token": "x" * 30}, key=None))
+        self.assertIn("another agent", self.refused("publish_site", {"html": "vandal", "site": s}))
+        self.assertEqual(self.anon("publish_site", {"html": "two", "site": s, "edit_token": token})["url"], out["url"])
+        self.assertEqual(self.http(f"/{s}/")[1], b"two")
+        self.assertEqual([x["site"] for x in self.anon("list_sites", {"edit_token": token})["sites"]], [s])
+        self.assertIn("edit_token", self.refused("delete_site", {"site": s}, key=None))
+        self.anon("delete_site", {"site": s, "edit_token": token})
+        self.assertEqual(self.http(f"/{s}/")[0], 404)
+
+    def test_an_agents_site_cannot_be_taken_without_its_key(self):
+        s = self.ok("publish_site", {"html": "agent"})["site"]
+        self.assertIn("another agent", self.refused("publish_site", {"html": "x", "site": s}, key=None))
+        self.assertEqual(self.http(f"/{s}/")[1], b"agent")
+
+    def test_a_wrong_key_is_still_refused(self):
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            self.call("publish_site", {"html": "x"}, key="wrong" * 10)
+        self.assertEqual(e.exception.code, 401)
+
+    def test_a_folder_without_a_key(self):
+        out = self.anon("publish_folder", {})
+        path = re.search(r"(/upload/\S+)$", out["command"]).group(1)
+        code, text = self.post(path, self.tar({"index.html": b"folder"}))
+        self.assertEqual(code, 200, text)
+        self.assertIn(out["edit_token"], text)
+        site = text.splitlines()[0].rstrip("/").rsplit("/", 1)[1]
+        self.assertEqual(self.http(f"/{site}/")[1], b"folder")
+
+
+class DangerLimits(unittest.TestCase):
+    """Publishing without a key is throttled per address, and has its own, smaller size limit."""
+
+    def test_per_address_and_size(self):
+        env = {"DANGER_MODE": "on", "DANGER_PUBLISHES_PER_HOUR": "2", "DANGER_MAX_SITE_MB": "1", "MAX_SITE_MB": "3",
+               "TRUSTED_PROXY_HEADER": "X-Real-IP"}
+        Server.EXTRA, saved = env, Server.EXTRA
+        try:
+            Server.setUpClass()
+            srv = Server("test_head_has_no_body")
+
+            def anon(html, ip):
+                body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                   "params": {"name": "publish_site", "arguments": {"html": html}}}).encode()
+                req = urllib.request.Request(Server.base + "/mcp", body, {"X-Real-IP": ip})
+                return json.load(urllib.request.urlopen(req))["result"]
+
+            self.assertIn("Too large", anon("x" * 1200000, "1.1.1.1")["content"][0]["text"])
+            self.assertFalse(anon("a", "2.2.2.2")["isError"])
+            self.assertFalse(anon("b", "2.2.2.2")["isError"])
+            self.assertIn("Too many", anon("c", "2.2.2.2")["content"][0]["text"])
+            self.assertFalse(anon("d", "3.3.3.3")["isError"])
+            self.assertFalse(srv.call("publish_site", {"html": "y" * 1200000})["isError"], "a keyed agent keeps its own limit")
+        finally:
+            Server.tearDownClass()
+            Server.EXTRA = saved

@@ -28,6 +28,10 @@ Connect an agent to `https://<domain>/mcp` with `Authorization: Bearer <key>`. P
 | `MAX_SITE_MB` | Size limit per site | 25 |
 | `MAX_FILES` | Files per site | 500 |
 | `MAX_SITES` | Sites on this server | 500 |
+| `DANGER_MODE` | `on` lets anyone publish without a key. See below | off |
+| `DANGER_MAX_SITE_MB` | Size limit per site published without a key | 5 |
+| `DANGER_PUBLISHES_PER_HOUR` | Publishes per hour from one address without a key | 20 |
+| `TRUSTED_PROXY_HEADER` | The header your proxy puts the visitor's address in, e.g. `X-Real-IP` | none |
 
 ## Tools
 
@@ -40,6 +44,16 @@ Connect an agent to `https://<domain>/mcp` with `Authorization: Bearer <key>`. P
 | `delete_site` | Take a site down |
 
 Only the agent that published a site can change or delete it.
+
+## Danger mode
+
+With `DANGER_MODE=on`, anyone who knows the address of `/mcp` can publish, with no key. Keyed agents work as before.
+
+- The first publish without a key returns an `edit_token`. It is the only way to update or delete that site, and it cannot be recovered.
+- Nobody can change a site they do not hold the key or `edit_token` for, so an agent's sites stay safe.
+- Publishing without a key has its own size limit and a limit per address and hour.
+
+Turn it on for a workshop or a demo, not on a domain you care about. An open host fills up with whatever people put there, and phishing pages on it can get the whole domain blocked.
 
 ## What to know before you share it
 

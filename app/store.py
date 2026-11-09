@@ -84,7 +84,7 @@ class Store:
                 return name
         raise ValueError("Could not find a free name.")
 
-    def publish(self, files, owner, name=None, title=None, keep_existing=False):
+    def publish(self, files, owner, name=None, title=None, keep_existing=False, max_bytes=None):
         """files: path -> bytes. The whole site is replaced, unless keep_existing. Returns the new site.json."""
         with self.lock:
             existing = self.get(name) if name else None
@@ -111,8 +111,9 @@ class Store:
             if len(manifest) > self.max_files:
                 raise ValueError(f"Too many files: {len(manifest)}, the limit is {self.max_files}.")
             total = sum(e["size"] for e in manifest.values())
-            if total > self.max_bytes:
-                raise ValueError(f"Too large: {total // 1048576} MB, the limit is {self.max_bytes // 1048576} MB.")
+            limit = max_bytes or self.max_bytes
+            if total > limit:
+                raise ValueError(f"Too large: {total // 1048576} MB, the limit is {limit // 1048576} MB.")
 
             name = name or self._new_name()
             d = self._dir(name)

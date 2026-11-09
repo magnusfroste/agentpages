@@ -8,6 +8,7 @@ services:
       MAX_SITE_MB: ${MAX_SITE_MB:-25}
       MAX_FILES: ${MAX_FILES:-500}
       MAX_SITES: ${MAX_SITES:-500}
+      DANGER_MODE: ${DANGER_MODE:-off}
     volumes:
       - pages-data:/data
     ports:
