@@ -1,0 +1,17 @@
+services:
+  pages:
+    build: .
+    restart: unless-stopped
+    environment:
+      MCP_KEYS: ${MCP_KEYS:?name:key pairs, one per agent}
+      PUBLIC_URL: ${PUBLIC_URL:?the address of this server}
+      MAX_SITE_MB: ${MAX_SITE_MB:-25}
+      MAX_FILES: ${MAX_FILES:-500}
+      MAX_SITES: ${MAX_SITES:-500}
+    volumes:
+      - pages-data:/data
+    ports:
+      - "8000:8000"
+
+volumes:
+  pages-data:
