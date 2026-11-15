@@ -282,7 +282,49 @@ class Server(Harness):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
         req = urllib.request.Request(self.base + "/mcp", body, {"Authorization": f"Bearer {KEY}"})
         names = {t["name"] for t in json.load(urllib.request.urlopen(req))["result"]["tools"]}
-        self.assertEqual(names, {"publish_site", "publish_folder", "list_sites", "read_site", "delete_site"})
+        self.assertEqual(names, {"publish_site", "publish_folder", "list_sites", "read_site", "delete_site", "list_versions", "restore_site"})
+
+    def blobs(self, site):
+        return len(os.listdir(os.path.join(self.tmp.name, "sites", site, "blobs")))
+
+    def test_a_publish_can_be_undone(self):
+        s = self.ok("publish_site", {"site": "undo", "files": {"index.html": "working", "lib.js": "same"}})["site"]
+        broken = self.ok("publish_site", {"site": s, "files": {"index.html": "broken", "lib.js": "same"}})
+        self.assertEqual(broken["version"], 2)
+        listed = self.ok("list_versions", {"site": s})
+        self.assertEqual((listed["live"]["version"], [v["version"] for v in listed["earlier"]]), (2, [1]))
+        back = self.ok("restore_site", {"site": s, "version": 1})
+        self.assertEqual((back["version"], back["restored_from"], back["url"]), (3, 1, broken["url"]), "same link, new version number")
+        self.assertEqual(self.http(f"/{s}/")[1], b"working")
+        self.assertEqual([v["version"] for v in self.ok("list_versions", {"site": s})["earlier"]], [2, 1])
+        self.ok("restore_site", {"site": s, "version": 2})
+        self.assertEqual(self.http(f"/{s}/")[1], b"broken", "a restore can be undone the same way")
+        self.assertEqual(self.blobs(s), 3, "working, broken and the shared lib.js, each stored once")
+
+    def test_versions_are_bounded_and_their_files_go_with_them(self):
+        s = self.ok("publish_site", {"site": "many", "html": "v1"})["site"]
+        for n in range(2, 16):
+            self.ok("publish_site", {"site": s, "html": f"v{n}"})
+        earlier = [v["version"] for v in self.ok("list_versions", {"site": s})["earlier"]]
+        self.assertEqual(earlier, list(range(14, 4, -1)), "the ten before the live one")
+        self.assertEqual(self.blobs(s), 11)
+        self.assertIn("no version 2", self.refused("restore_site", {"site": s, "version": 2}))
+
+    def test_only_the_owner_sees_and_restores_versions(self):
+        s = self.ok("publish_site", {"site": "mine", "html": "a"})["site"]
+        self.ok("publish_site", {"site": s, "html": "b"})
+        self.assertIn("another agent", self.refused("list_versions", {"site": s}, KEY2))
+        self.assertIn("another agent", self.refused("restore_site", {"site": s, "version": 1}, KEY2))
+        self.assertIn("must be a number", self.refused("restore_site", {"site": s, "version": "latest"}))
+        self.assertEqual(self.http(f"/{s}/")[1], b"b")
+
+    def test_deleting_a_site_deletes_its_versions(self):
+        s = self.ok("publish_site", {"site": "gone", "html": "a"})["site"]
+        self.ok("publish_site", {"site": s, "html": "b"})
+        self.ok("delete_site", {"site": s})
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "sites", s)))
+        self.ok("publish_site", {"site": s, "html": "new owner, fresh start"}, KEY2)
+        self.assertEqual(self.ok("list_versions", {"site": s}, KEY2)["earlier"], [])
 
     def test_a_folder_is_published_with_one_command(self):
         path = self.upload_path(folder="/opt/data/my game", title="Spelet")
@@ -394,6 +436,14 @@ class DangerMode(Server):
             self.call("publish_site", {"html": "x"}, key="wrong" * 10)
         self.assertEqual(e.exception.code, 401)
 
+    def test_without_a_key_the_edit_token_restores(self):
+        out = self.anon("publish_site", {"html": "one"})
+        s, token = out["site"], out["edit_token"]
+        self.anon("publish_site", {"html": "two", "site": s, "edit_token": token})
+        self.assertIn("edit_token", self.refused("restore_site", {"site": s, "version": 1}, key=None))
+        self.anon("restore_site", {"site": s, "version": 1, "edit_token": token})
+        self.assertEqual(self.http(f"/{s}/")[1], b"one")
+
     def test_a_folder_without_a_key(self):
         out = self.anon("publish_folder", {})
         path = re.search(r"(/upload/\S+)$", out["command"]).group(1)
@@ -494,3 +544,24 @@ class SiteDomain(Harness):
 
     def test_www_is_not_a_site_name(self):
         self.assertIn("reserved", self.refused("publish_site", {"html": "x", "site": "www"}))
+
+
+class LegacySites(unittest.TestCase):
+    """A site published before versions existed has no number. Its first publish after keeps it as version 1."""
+
+    def test_an_old_site_becomes_version_one(self):
+        sys.path.insert(0, APP)
+        from store import Store
+        with tempfile.TemporaryDirectory() as data:
+            store = Store(data, 1048576, 10, 10)
+            meta = store.publish({"index.html": b"old"}, "ada", name="legacy")
+            path = os.path.join(data, "sites", "legacy", "site.json")
+            del meta["version"]
+            with open(path, "w") as f:
+                json.dump(meta, f)
+            new = store.publish({"index.html": b"new"}, "ada", name="legacy")
+            self.assertEqual(new["version"], 2)
+            self.assertEqual([v["version"] for v in store.versions("legacy")], [1])
+            self.assertEqual(store.read("legacy", "index.html")[0], b"new")
+            store.restore("legacy", "ada", 1)
+            self.assertEqual(store.read("legacy", "index.html")[0], b"old")

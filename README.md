@@ -42,6 +42,7 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 | `MAX_SITE_MB` | Size limit per site | 25 |
 | `MAX_FILES` | Files per site | 500 |
 | `MAX_SITES` | Sites on this server | 500 |
+| `KEEP_VERSIONS` | Earlier versions kept per site, for `restore_site`. `0` keeps none | 10 |
 | `DANGER_MODE` | `on` lets anyone publish without a key. See [Danger mode](#danger-mode) | off |
 | `DANGER_MAX_SITE_MB` | Size limit per site published without a key | 5 |
 | `DANGER_PUBLISHES_PER_HOUR` | Publishes per hour from one address without a key | 20 |
@@ -55,8 +56,12 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 | `publish_site` | every agent | Publish `html` for one page, or `files` and `binary_files` for a few. Best for small sites |
 | `list_sites` | every agent | The sites this agent has published |
 | `read_site` | every agent | A site's file list, or one file, to change something published earlier |
+| `list_versions` | every agent | The live version of one of its sites and the earlier ones that are kept |
+| `restore_site` | every agent | Undo a publish: an earlier version goes live again at the same link. The one that was live is kept, so a restore can be undone too |
 | `delete_site` | every agent | Take down one of its own sites. An admin can take down any site |
 | `list_all_sites` | admin only | Every site, newest first, with who published it and warning signs |
+
+Every publish keeps the version before it, up to `KEEP_VERSIONS` (10) per site. A file that did not change between versions is stored once, so ten versions of a game where one script changed cost ten copies of that script, not of the game. `delete_site` takes all versions with it.
 
 Hidden files and `node_modules` are left out of an upload. A site needs an `index.html` at the top, and may have its own `404.html`.
 
