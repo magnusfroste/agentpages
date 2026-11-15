@@ -7,6 +7,9 @@ cookies on this origin, so there is nothing here for a published script to steal
 Environment:
   MCP_KEYS       name:key pairs, comma separated, one per agent (keys 32+ characters)
   PUBLIC_URL     e.g. https://pages.example.com, for the links agents get back
+  SITE_DOMAIN    e.g. pages.example.com: an agent's site lives at https://<site>.pages.example.com/, an origin of its own,
+                 and /<site>/ on PUBLIC_URL redirects there. Needs a wildcard DNS record and a certificate per name.
+                 Sites published without a key stay at /<site>/ (default: empty, every site at /<site>/)
   MAX_SITE_MB    size limit per site (default 25)
   MAX_FILES      files per site (default 500)
   MAX_SITES      sites on this server (default 500)
@@ -17,7 +20,7 @@ Environment:
   TRUSTED_PROXY_HEADER  e.g. X-Real-IP, the visitor's address when behind a proxy (for those limits)
   DATA_DIR/PORT  default /data, 8000
 
-Routes: POST /mcp | POST /upload/<token> | /moderation/... | /health | /<site>/...
+Routes: POST /mcp | POST /upload/<token> | /moderation/... | /health | /<site>/... | any path on <site>.SITE_DOMAIN
 """
 import base64
 import binascii
@@ -43,6 +46,8 @@ from store import Store
 VERSION = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")).read().strip()
 DATA = os.environ.get("DATA_DIR", "/data")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+SITE_DOMAIN = os.environ.get("SITE_DOMAIN", "").strip().lower().strip(".")
+SCHEME = PUBLIC_URL.partition("://")[0] if "://" in PUBLIC_URL else "https"
 MAX_BYTES = int(os.environ.get("MAX_SITE_MB", "25")) * 1048576
 READ_LIMIT = 2 * 1048576
 UPLOAD_SECONDS = 900
@@ -155,18 +160,29 @@ def with_token(result, token):
     return result
 
 
-def url_of(name):
-    return f"{PUBLIC_URL}/{name}/"
+def own_origin(meta):
+    """Whether a site lives at <site>.SITE_DOMAIN. Only an agent's: each name there costs a certificate, and the
+    certificate authority allows a registered domain only so many new ones a week. With no key needed to publish,
+    anyone could spend them, and then the hotel's other guests could not get theirs."""
+    return bool(SITE_DOMAIN) and not meta["owner"].startswith("anonymous:")
+
+
+def url_of(meta):
+    if own_origin(meta):
+        return f"{SCHEME}://{meta['name']}.{SITE_DOMAIN}/"
+    return f"{PUBLIC_URL}/{meta['name']}/"
 
 
 def summary(meta):
-    return {"site": meta["name"], "url": url_of(meta["name"]), "title": meta["title"], "files": len(meta["files"]),
+    return {"site": meta["name"], "url": url_of(meta), "title": meta["title"], "files": len(meta["files"]),
             "bytes": sum(e["size"] for e in meta["files"].values()),
             "updated": datetime.fromtimestamp(meta["updated"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
 
 
-def warnings_for(files):
+def warnings_for(files, meta):
     out = []
+    if own_origin(meta):  # at the root of its own host, /assets/app.js is the site's own file
+        return out
     for path, data in files.items():
         if os.path.splitext(path)[1].lower() in (".html", ".htm", ".css") and ROOT_REF.search(data.decode("utf-8", "replace")):
             out.append(f"{path} refers to something at the root of the domain (it starts with /). This site lives under its own "
@@ -201,7 +217,7 @@ def t_publish(args, who):
     meta = store.publish(files, owner, name=args.get("site") or None, title=args.get("title"), keep_existing=bool(args.get("keep_existing")),
                          max_bytes=limit)
     log(f"{who.name or 'anonymous ' + who.ip}: published {meta['name']} ({len(meta['files'])} files)")
-    return with_token({**summary(meta), "warnings": warnings_for(files)}, token)
+    return with_token({**summary(meta), "warnings": warnings_for(files, meta)}, token)
 
 
 # A model should not have to repeat a whole game back through a tool call. publish_folder gives it one command for
@@ -299,7 +315,7 @@ def site_summary(meta):
     owner = "anonymous" if meta["owner"].startswith("anonymous:") else f"agent {meta['owner']}"
     lines = [f"site {meta['name']} | {owner} | updated {datetime.fromtimestamp(meta['updated'], timezone.utc):%Y-%m-%d %H:%M} UTC | "
              f"{len(meta['files'])} files, {sum(e['size'] for e in meta['files'].values()) // 1024} KB",
-             f"  url: {url_of(meta['name'])}",
+             f"  url: {url_of(meta)}",
              f"  title: {' '.join(htmllib.unescape(title.group(1)).split())[:120] if title else '(none)'} / given: {meta['title'][:80] or '(none)'}",
              f"  text: {visible or '(no visible text)'}",
              f"  signals: {'; '.join(signals) or 'none'}",
@@ -407,6 +423,8 @@ def rpc(msg, who):
                    "serverInfo": {"name": "agentpages", "version": VERSION},
                    "instructions": "Publish a folder from your disk with publish_folder, or one page with publish_site, and give people the link. Everything published is public "
                                    "to anyone with the link. Sites run in the visitor's browser only: there is no server code or database."
+                                   + (f" Each of your sites gets an address of its own, https://<site>.{SITE_DOMAIN}/, so it can refer to its files "
+                                      "from the root (/assets/app.js) and a Vite build works with its default base." if SITE_DOMAIN else "")
                                    + (" This server is in danger mode: you may publish without a key. Keep the edit_token you get, it is "
                                       "the only way to change your site later." if DANGER else "")})
     if method == "ping":
@@ -456,14 +474,34 @@ class Handler(BaseHTTPRequestHandler):
     def json(self, code, value, headers=None):
         self.send(code, json.dumps(value, ensure_ascii=False).encode(), "application/json", headers)
 
-    def redirect(self, location):
-        self.send(301, b"", headers={"Location": location, "Cache-Control": "no-cache"})
+    def redirect(self, location, code=301):
+        self.send(code, b"", headers={"Location": location, "Cache-Control": "no-cache"})
+
+    def site_label(self):
+        """The site this request's host names, '' for a host under SITE_DOMAIN that is not one, or None for every
+        other host (this server's own address, a container name, an IP)."""
+        if not SITE_DOMAIN:
+            return None
+        host = (self.headers.get("Host") or "").strip().lower()
+        host = (host.rpartition(":")[0] if re.search(r":\d+$", host) else host).rstrip(".")
+        if not host.endswith("." + SITE_DOMAIN):
+            return None
+        label = host[:-len(SITE_DOMAIN) - 1]
+        return label if "." not in label else ""
 
     def do_HEAD(self):
         self.do_GET()
 
     def do_GET(self):
         raw, _, query = self.path.partition("?")
+        label = self.site_label()
+        if label is not None:
+            # A site's own host serves that site and nothing else: no /mcp, no moderation, no other site's files.
+            # A 404 here also tells the hotel's certificate check that there is no such site.
+            meta = store.get(label)
+            if not meta or not own_origin(meta):
+                return self.send(404, b"There is no site at this address.\n")
+            return self.serve(meta, raw, query, "/")
         if raw == "/health":
             return self.json(200, {"ok": True, "version": VERSION})
         if raw == "/":
@@ -489,7 +527,7 @@ class Handler(BaseHTTPRequestHandler):
         if not meta or not hmac.compare_digest(m.group(2), takedown_sig(meta)):
             return self.send(404, b"This take-down link is not valid any more: the site is gone or has changed since.\n", headers=quiet)
         if not post:  # a link preview must never take a site down, so the link only shows a button
-            page = TAKEDOWN_PAGE.format(name=meta["name"], url=htmllib.escape(url_of(meta["name"])))
+            page = TAKEDOWN_PAGE.format(name=meta["name"], url=htmllib.escape(url_of(meta)))
             return self.send(200, page.encode(), "text/html; charset=utf-8", {**quiet, "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"})
         store.delete(meta["name"], meta["owner"])
         log(f"admin link: took down {meta['name']} (from {self.ip()})")
@@ -501,15 +539,24 @@ class Handler(BaseHTTPRequestHandler):
         if not meta:
             return self.send(404, b"There is no site at this address.\n")
         suffix = f"?{query}" if query else ""
+        if own_origin(meta):
+            # Old links keep working. 302, not 301: a browser keeps a 301 for good, and turning SITE_DOMAIN off
+            # again would leave every visitor who ever followed one stuck on a host that no longer answers.
+            return self.redirect(f"{url_of(meta)}{rest}{suffix}", 302)
         if not slash:
             return self.redirect(f"/{name}/{suffix}")
-        path = urllib.parse.unquote(rest)
+        return self.serve(meta, "/" + rest, query, f"/{name}/")
+
+    def serve(self, meta, raw, query, base):
+        """One file of a site. raw is the path below the site, starting with /; base is where the site starts."""
+        name, suffix = meta["name"], f"?{query}" if query else ""
+        path = urllib.parse.unquote(raw[1:])
         files = meta["files"]
         # Only what the manifest names is ever served, and a redirect is built from that same key.
         if not path or path.endswith("/"):
             path += "index.html"
         elif path not in files and f"{path}/index.html" in files:
-            return self.redirect(f"/{name}/{urllib.parse.quote(path)}/{suffix}")
+            return self.redirect(f"{base}{urllib.parse.quote(path)}/{suffix}")
         code = 200
         found = store.read(name, path)
         if not found:
@@ -539,8 +586,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, f"Not published: {e}\n".encode())
         uploads.pop(token, None)
         log(f"{job['by']}: uploaded {meta['name']} ({len(meta['files'])} files)")
-        lines = [url_of(meta["name"])] + ([f"edit_token: {job['edit_token']} (save it: the only way to update or delete this site)"]
-                                          if job["edit_token"] else []) + [f"Warning: {w}" for w in warnings_for(files)]
+        lines = [url_of(meta)] + ([f"edit_token: {job['edit_token']} (save it: the only way to update or delete this site)"]
+                                  if job["edit_token"] else []) + [f"Warning: {w}" for w in warnings_for(files, meta)]
         return self.send(200, ("\n".join(lines) + "\n").encode())
 
     def ip(self):
@@ -558,6 +605,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(413, {"error": f"Too large. A site can be at most {MAX_BYTES // 1048576} MB."})
         body = self.rfile.read(n)
         route = self.path.partition("?")[0]
+        if self.site_label() is not None:
+            return self.send(404, b"not found")
         if route.startswith("/moderation/"):
             return self.moderation(route, post=True)
         if route.startswith("/upload/"):
@@ -590,6 +639,8 @@ def main():
         log(f"admin: {', '.join(sorted(ADMINS))} can list and take down every site")
     if DANGER:
         log(f"DANGER MODE: anyone can publish without a key ({DANGER_BYTES // 1048576} MB per site, {DANGER_PER_HOUR} publishes per hour per address)")
+    if SITE_DOMAIN:
+        log(f"sites of agents at https://<site>.{SITE_DOMAIN}/, sites without a key at {PUBLIC_URL}/<site>/")
     log(f"AgentPages {VERSION} on :{port}, {PUBLIC_URL or '(no PUBLIC_URL)'}, {len(store.all())} site(s), "
         f"agents: {', '.join(sorted(KEYS.values())) or '-'}, python {platform.python_version()}")
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
