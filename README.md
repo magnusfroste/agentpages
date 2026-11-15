@@ -37,6 +37,7 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 |---|---|---|
 | `MCP_KEYS` | `name:key` pairs, comma separated, one per agent. Keys are 32+ characters (`openssl rand -hex 32`) | none |
 | `PUBLIC_URL` | The address of this server, for the links agents get back | none |
+| `SITE_DOMAIN` | e.g. `pages.example.com`: each agent's site gets an address of its own, `https://<site>.pages.example.com/`. See [A host per site](#a-host-per-site) | none |
 | `ADMIN_AGENTS` | Names from `MCP_KEYS` that can list and take down every site | none |
 | `MAX_SITE_MB` | Size limit per site | 25 |
 | `MAX_FILES` | Files per site | 500 |
@@ -96,12 +97,30 @@ With `DANGER_MODE=on`, anyone who knows the address of `/mcp` can publish, with 
 
 An open host fills up with whatever people put there, and phishing pages on it can get the whole domain blocked. Watch it, and turn it on only where you can live with that.
 
+## A host per site
+
+Set `SITE_DOMAIN` and every site an agent publishes lives at `https://<site>.<SITE_DOMAIN>/` instead of `https://<domain>/<site>/`:
+
+- **It is an origin of its own.** `localStorage`, IndexedDB, cookies and service workers belong to that site alone, so two games that both save `progress` keep their own, and a site cannot read what another stored. A web app can be installed on a home screen.
+- **A build works as it is.** `/assets/app.js` is the site's own file, so a Vite or React build needs no `base: './'`, and `publish_site` stops warning about root paths.
+- **Old links keep working.** `https://<domain>/<site>/...` redirects (302) to the new host, with the rest of the path and the query.
+- **A site's host serves that site and nothing else.** `/mcp`, `/upload`, `/moderation` and the other sites are only on the server's own address. A name with no site, or with more than one label, is a 404.
+
+Sites published without a key (danger mode) stay at `https://<domain>/<site>/`. Each name on a site host needs a certificate of its own, and a certificate authority gives one registered domain only so many new ones a week (Let's Encrypt: 50). With no key needed, anyone could spend them, and then nothing else on the domain could get a new one.
+
+What it needs:
+
+1. A wildcard DNS record, `*.pages.example.com`, pointing at the server. A wildcard covers one level, so the sites are `<site>.pages.example.com`, never `a.b.pages.example.com`. Behind Cloudflare, a free certificate covers only one level below the zone (`*.example.com`), so make the record DNS only and let the server hold the certificates.
+2. A certificate per name, fetched on a site's first visit. Ask your proxy to check first that the name answers: AgentPages gives 2xx at `/` only for a site it has, so nobody can make you fetch certificates for names that do not exist. Caddy calls this on-demand TLS with a `permission` endpoint. On AgentHotel, put `*.pages.example.com` under Extra domains and the hotel does it.
+
+All sites under one `SITE_DOMAIN` are still one registered domain. A site can set a cookie for the domain above it, as it can today on the shared host. If anything there signs people in with cookies, give the sites a registered domain of their own, the way GitHub Pages uses `github.io` and not `github.com`.
+
 ## What to know before you share it
 
 - **Sites are public to anyone with the link.** They are not listed anywhere and ask search engines not to index them, but the link is the only protection.
 - **Sites are static.** JavaScript runs in the visitor's browser. There is no server code or database.
-- **Links between files must be relative.** A site lives under its own folder, so `/assets/app.js` does not load. `publish_site` warns about this. In Vite, set `base: './'`.
-- **Sites share one origin.** `localStorage` works, which games need, and one site can read what another stored there. Nothing secret lives on this origin: no cookies, no sign-ins, and the keys only travel in the `Authorization` header of MCP calls. Do not publish a site that keeps private data in the browser.
+- **Links between files must be relative**, unless `SITE_DOMAIN` is set. A site lives under its own folder, so `/assets/app.js` does not load. `publish_site` warns about this. In Vite, set `base: './'`.
+- **Sites share one origin**, unless `SITE_DOMAIN` is set. `localStorage` works, which games need, and one site can read what another stored there. Nothing secret lives on this origin: no cookies, no sign-ins, and the keys only travel in the `Authorization` header of MCP calls. Do not publish a site that keeps private data in the browser.
 - **Files live in `/data/sites/<name>/`.** Back up that volume. To remove a site by hand, delete its folder.
 
 ## Test

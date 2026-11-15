@@ -27,7 +27,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 opener = urllib.request.build_opener(NoRedirect)
 
 
-class Server(unittest.TestCase):
+class Harness(unittest.TestCase):
+    """A server of its own per class, and the calls an agent and a visitor make."""
     EXTRA = {}
 
     @classmethod
@@ -79,6 +80,35 @@ class Server(unittest.TestCase):
         self.assertTrue(result["isError"], result)
         return result["content"][0]["text"]
 
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, body, method="POST")
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+
+    def upload_path(self, **args):
+        out = self.ok("publish_folder", args)
+        self.assertIn("tar -czf - -C", out["command"])
+        return re.search(r"https://pages\.example\.com(/upload/\S+)$", out["command"]).group(1)
+
+    def tar(self, files, links=(), mode="w:gz"):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode=mode) as t:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+            for name, target in links:
+                info = tarfile.TarInfo(name)
+                info.type = tarfile.SYMTYPE
+                info.linkname = target
+                t.addfile(info)
+        return buf.getvalue()
+
+
+class Server(Harness):
     def test_one_page_gets_a_link_anyone_can_open(self):
         out = self.ok("publish_site", {"html": "<h1>hej</h1>", "title": "Hej"})
         self.assertRegex(out["url"], r"^https://pages\.example\.com/[a-z]+-[a-z]+-[0-9a-f]{6}/$")
@@ -254,33 +284,6 @@ class Server(unittest.TestCase):
         names = {t["name"] for t in json.load(urllib.request.urlopen(req))["result"]["tools"]}
         self.assertEqual(names, {"publish_site", "publish_folder", "list_sites", "read_site", "delete_site"})
 
-    def post(self, path, body):
-        req = urllib.request.Request(self.base + path, body, method="POST")
-        try:
-            with urllib.request.urlopen(req) as r:
-                return r.status, r.read().decode()
-        except urllib.error.HTTPError as e:
-            return e.code, e.read().decode()
-
-    def upload_path(self, **args):
-        out = self.ok("publish_folder", args)
-        self.assertIn("tar -czf - -C", out["command"])
-        return re.search(r"https://pages\.example\.com(/upload/\S+)$", out["command"]).group(1)
-
-    def tar(self, files, links=(), mode="w:gz"):
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode=mode) as t:
-            for name, data in files.items():
-                info = tarfile.TarInfo(name)
-                info.size = len(data)
-                t.addfile(info, io.BytesIO(data))
-            for name, target in links:
-                info = tarfile.TarInfo(name)
-                info.type = tarfile.SYMTYPE
-                info.linkname = target
-                t.addfile(info)
-        return buf.getvalue()
-
     def test_a_folder_is_published_with_one_command(self):
         path = self.upload_path(folder="/opt/data/my game", title="Spelet")
         code, text = self.post(path, self.tar({"./index.html": b"<h1>game</h1>", "./content/a.js": b"x"}))
@@ -427,3 +430,67 @@ class DangerLimits(unittest.TestCase):
         finally:
             Server.tearDownClass()
             Server.EXTRA = saved
+
+
+class SiteDomain(Harness):
+    """With SITE_DOMAIN, an agent's site is an origin of its own: storage, cookies and service workers are its alone, and
+    a build that refers to /assets/... works as it is. Sites published without a key stay on the shared host."""
+    EXTRA = {"SITE_DOMAIN": "pages.example.com", "DANGER_MODE": "on", "DANGER_PUBLISHES_PER_HOUR": "1000"}
+
+    def on(self, site, path="/", method="GET"):
+        return self.http(path, {"Host": f"{site}.pages.example.com"}, method)
+
+    def test_an_agents_site_gets_its_own_host(self):
+        out = self.ok("publish_site", {"site": "snake", "files": {"index.html": '<script src="/assets/game.js"></script>',
+                                                                   "assets/game.js": "go()"}})
+        self.assertEqual(out["url"], "https://snake.pages.example.com/")
+        self.assertEqual(out["warnings"], [], "a root path is the site's own file on its own host")
+        self.assertEqual(self.on("snake")[:2], (200, b'<script src="/assets/game.js"></script>'))
+        code, body, headers = self.on("snake", "/assets/game.js")
+        self.assertEqual((code, body, headers["Content-Type"]), (200, b"go()", "text/javascript; charset=utf-8"))
+        self.assertEqual(self.http("/snake/assets/game.js", {"Host": "snake.pages.example.com:443"})[0], 404,
+                         "on its own host the site starts at the root")
+        self.assertEqual(self.http("/assets/game.js", {"Host": "SNAKE.Pages.Example.com.:443"})[1], b"go()")
+
+    def test_the_old_link_redirects_to_the_new_host(self):
+        self.ok("publish_site", {"site": "moved", "files": {"index.html": "i", "docs/index.html": "d"}})
+        for path, to in (("/moved", "https://moved.pages.example.com/"), ("/moved/", "https://moved.pages.example.com/"),
+                         ("/moved/docs/?level=2", "https://moved.pages.example.com/docs/?level=2"),
+                         ("/moved//evil.example/x", "https://moved.pages.example.com//evil.example/x")):
+            code, _, headers = self.http(path)
+            self.assertEqual((code, headers["Location"]), (302, to), path)
+        code, _, headers = self.on("moved", "/docs?x=1")
+        self.assertEqual((code, headers["Location"]), (301, "/docs/?x=1"))
+
+    def test_a_host_with_no_site_is_a_404(self):
+        # The hotel asks for a certificate only for a name that answers 2xx or 3xx at /.
+        self.ok("publish_site", {"site": "real", "html": "r"})
+        self.assertEqual(self.on("nosuchsite")[0], 404)
+        self.assertEqual(self.on("a.real")[0], 404, "one label only, as a wildcard certificate means it")
+        self.assertEqual(self.http("/", {"Host": "pages.example.com"})[0], 200, "the server's own address is the home page")
+
+    def test_a_site_host_serves_that_site_and_nothing_else(self):
+        self.ok("publish_site", {"site": "one", "html": "1"})
+        self.ok("publish_site", {"site": "two", "html": "2"})
+        self.assertEqual(self.on("one", "/two/")[0], 404)
+        self.assertEqual(self.on("one", "/health")[0], 404)
+        self.assertEqual(self.on("one", "/moderation/feed")[0], 404)
+        self.assertEqual(self.on("one", "/mcp", "POST")[0], 404)
+        self.assertEqual(self.http("/health")[0], 200, "the container's own address still answers the health check")
+
+    def test_sites_without_a_key_stay_on_the_shared_host(self):
+        # Each name on a site host costs a certificate, and a registered domain gets only so many a week.
+        out = self.ok("publish_site", {"html": "anon"}, key=None)
+        self.assertRegex(out["url"], r"^https://pages\.example\.com/[a-z]+-[a-z]+-[0-9a-f]{6}/$")
+        self.assertEqual(self.http(f"/{out['site']}/")[1], b"anon")
+        self.assertEqual(self.on(out["site"])[0], 404)
+        warned = self.ok("publish_site", {"html": '<img src="/logo.png">'}, key=None)["warnings"]
+        self.assertEqual(len(warned), 1)
+
+    def test_a_folder_upload_prints_the_new_host(self):
+        path = self.upload_path(site="game")
+        code, text = self.post(path, self.tar({"index.html": b"<link href='/style.css'>", "style.css": b"x"}))
+        self.assertEqual((code, text), (200, "https://game.pages.example.com/\n"))
+
+    def test_www_is_not_a_site_name(self):
+        self.assertIn("reserved", self.refused("publish_site", {"html": "x", "site": "www"}))
