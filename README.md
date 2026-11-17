@@ -47,6 +47,8 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 | `DANGER_MAX_SITE_MB` | Size limit per site published without a key | 5 |
 | `DANGER_PUBLISHES_PER_HOUR` | Publishes per hour from one address without a key | 20 |
 | `TRUSTED_PROXY_HEADER` | The header your proxy puts the visitor's address in, e.g. `X-Real-IP` | none |
+| `STATS_DAYS` | Days of visit and publish counts kept. See [Visits and the start page](#visits-and-the-start-page) | 90 |
+| `DASHBOARD_MINUTES` | How long a link from `dashboard_link` works | 60 |
 
 ## Tools
 
@@ -60,6 +62,9 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 | `restore_site` | every agent | Undo a publish: an earlier version goes live again at the same link. The one that was live is kept, so a restore can be undone too |
 | `delete_site` | every agent | Take down one of its own sites. An admin can take down any site |
 | `list_all_sites` | admin only | Every site, newest first, with who published it and warning signs |
+| `dashboard_link` | admin only | A link to the dashboard, for the person who runs the server. See [The dashboard](#the-dashboard) |
+
+`list_sites` also says how many times each site was viewed in the last seven days, so an agent can tell which of its games get played.
 
 Every publish keeps the version before it, up to `KEEP_VERSIONS` (10) per site. A file that did not change between versions is stored once, so ten versions of a game where one script changed cost ten copies of that script, not of the game. `delete_site` takes all versions with it.
 
@@ -119,6 +124,28 @@ What it needs:
 2. A certificate per name, fetched on a site's first visit. Ask your proxy to check first that the name answers: AgentPages gives 2xx at `/` only for a site it has, so nobody can make you fetch certificates for names that do not exist. Caddy calls this on-demand TLS with a `permission` endpoint. On AgentHotel, put `*.pages.example.com` under Extra domains and the hotel does it.
 
 All sites under one `SITE_DOMAIN` are still one registered domain. A site can set a cookie for the domain above it, as it can today on the shared host. If anything there signs people in with cookies, give the sites a registered domain of their own, the way GitHub Pages uses `github.io` and not `github.com`.
+
+## Visits and the start page
+
+The address of the server itself, `https://pages.example.com/`, explains what it is to whoever lands there: how to connect an agent, what a site can and cannot be, the limits that are set, the tools, and totals for the server (sites, agents publishing, publishes and visits in the last week, visits per day for 30 days). It never lists a site, a title or an agent's name: a site is found only through its link.
+
+A visit is a page view of a site's HTML in a browser. Images and scripts, prefetches, link previews, crawlers, headless browsers and command-line clients do not count, and a game shown in a frame on another page does. Only a number per site and day is kept, in `/data/stats/<day>.json`: no address, no cookie, nothing about the browser. So it counts views, not people.
+
+## The dashboard
+
+An admin agent's `dashboard_link` gives a link that shows the person who runs the server everything, with no sign-in:
+
+- every site with its link, owner, version and the earlier versions kept, size, last publish, visits in 7 and 30 days, warning signs (a password field, a form that sends elsewhere, a redirect) and its take-down link
+- per agent: sites, size, publishes and visits
+- visits and publishes per day for 30 days
+- every setting with its value, its default and what it does. Agents are shown by name; keys never are
+
+```text
+You:    Send me the Pages dashboard.
+Agent:  dashboard_link()  ->  https://pages.example.com/moderation/dashboard/admin/1794960000/1f3a...
+```
+
+The link is signed with the admin keys and works for `DASHBOARD_MINUTES` (60). Anyone who has it sees what the admin sees until then, so it goes to that person only. Changing an admin key ends every link made with it. Add `?format=json` for the same data as JSON. The page runs no script, cannot be framed by another page, and opens every site with `noopener noreferrer`, so a site opened from it cannot reach back into it.
 
 ## What to know before you share it
 
