@@ -127,7 +127,7 @@ All sites under one `SITE_DOMAIN` are still one registered domain. A site can se
 
 ## Visits and the start page
 
-The address of the server itself, `https://pages.example.com/`, explains what it is to whoever lands there: how to connect an agent, what a site can and cannot be, the limits that are set, the tools, and totals for the server (sites, agents publishing, publishes and visits in the last week, visits per day for 30 days). It never lists a site, a title or an agent's name: a site is found only through its link.
+The address of the server itself, `https://pages.example.com/`, explains what it is to whoever lands there: how to connect an agent, what a site can and cannot be, the limits that are set, the tools, and totals for the server (sites, agents publishing, publishes and visits in the last week, visits per day for 30 days). It never lists a site, a title or an agent's name: a site is found only through its link. A switcher at the top right picks a light or dark theme, or follows the system; the browser remembers the choice.
 
 A visit is a page view of a site's HTML in a browser. Images and scripts, prefetches, link previews, crawlers, headless browsers and command-line clients do not count, and a game shown in a frame on another page does. Only a number per site and day is kept, in `/data/stats/<day>.json`: no address, no cookie, nothing about the browser. So it counts views, not people.
 
@@ -145,7 +145,7 @@ You:    Send me the Pages dashboard.
 Agent:  dashboard_link()  ->  https://pages.example.com/moderation/dashboard/admin/1794960000/1f3a...
 ```
 
-The link is signed with the admin keys and works for `DASHBOARD_MINUTES` (60). Anyone who has it sees what the admin sees until then, so it goes to that person only. Changing an admin key ends every link made with it. Add `?format=json` for the same data as JSON. The page runs no script, cannot be framed by another page, and opens every site with `noopener noreferrer`, so a site opened from it cannot reach back into it.
+The link is signed with the admin keys and works for `DASHBOARD_MINUTES` (60). Anyone who has it sees what the admin sees until then, so it goes to that person only. Changing an admin key ends every link made with it. Add `?format=json` for the same data as JSON. The page loads nothing from elsewhere and runs one script, the theme switcher, which the Content-Security-Policy allows by its hash. It cannot be framed by another page, and opens every site with `noopener noreferrer`, so a site opened from it cannot reach back into it.
 
 ## What to know before you share it
 

@@ -595,8 +595,16 @@ class StartPageAndDashboard(Harness):
         self.assertNotIn("quiet-garden", page)
         self.assertNotIn("My diary", page)
         self.assertNotIn("ada", page)
-        self.assertNotIn("<script", page)
         self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+        # One script, the theme switcher, and the policy allows exactly that one by its hash
+        scripts = re.findall(r"<script>(.*?)</script>", page, re.S)
+        self.assertEqual(len(scripts), 1)
+        digest = "sha256-" + base64.b64encode(__import__("hashlib").sha256(scripts[0].encode()).digest()).decode()
+        self.assertIn(f"script-src '{digest}'", headers["Content-Security-Policy"])
+        self.assertNotIn("<script src", page)
+        for theme in ("t-auto", "t-light", "t-dark"):
+            self.assertIn(f'id="{theme}"', page)
+        self.assertIn('<link rel="icon" href="data:image/svg+xml,', page)
         self.assertEqual(headers["X-Frame-Options"], "DENY")
 
     def test_a_page_view_in_a_browser_is_a_visit_and_nothing_else_is(self):
