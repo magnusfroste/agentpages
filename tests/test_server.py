@@ -565,3 +565,142 @@ class LegacySites(unittest.TestCase):
             self.assertEqual(store.read("legacy", "index.html")[0], b"new")
             store.restore("legacy", "ada", 1)
             self.assertEqual(store.read("legacy", "index.html")[0], b"old")
+
+
+BROWSER = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36",
+           "Sec-Fetch-Dest": "document"}
+
+
+class StartPageAndDashboard(Harness):
+    """What a person sees at the root, what counts as a visit, and the admin's dashboard link."""
+    EXTRA = {"HOME_CACHE_SECONDS": "0", "STATS_FLUSH_SECONDS": "0"}
+
+    def dashboard(self, key=ADMIN):
+        out = self.ok("dashboard_link", key=key)
+        self.assertRegex(out["url"], r"^https://pages\.example\.com/moderation/dashboard/root/\d+/[0-9a-f]{32}$")
+        return out["url"][len("https://pages.example.com"):]
+
+    def visits(self, site, key=KEY):
+        return next(s["visits_7d"] for s in self.ok("list_sites", key=key)["sites"] if s["site"] == site)
+
+    def test_the_start_page_explains_without_listing_any_site(self):
+        self.ok("publish_site", {"html": "x", "site": "quiet-garden", "title": "My diary"})
+        code, body, headers = self.http("/")
+        page = body.decode()
+        self.assertEqual(code, 200)
+        self.assertIn("https://pages.example.com/mcp", page)
+        self.assertIn("claude mcp add --transport http pages", page)
+        self.assertIn("Authorization: Bearer &lt;your key&gt;", page)
+        self.assertIn("1 MB", page)  # MAX_SITE_MB from the environment
+        self.assertNotIn("quiet-garden", page)
+        self.assertNotIn("My diary", page)
+        self.assertNotIn("ada", page)
+        self.assertNotIn("<script", page)
+        self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+
+    def test_a_page_view_in_a_browser_is_a_visit_and_nothing_else_is(self):
+        self.ok("publish_site", {"files": {"index.html": "<p>hi</p>", "app.js": "1", "more.html": "m"}, "site": "counted"})
+        self.http("/counted/", BROWSER)
+        self.http("/counted/more.html", BROWSER)
+        self.http("/counted/app.js", BROWSER)  # an asset
+        self.http("/counted/", {**BROWSER, "Sec-Fetch-Dest": "script"})
+        self.http("/counted/", {**BROWSER, "Sec-Purpose": "prefetch"})
+        self.http("/counted/", {"User-Agent": "curl/8.5"})
+        self.http("/counted/", {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1)"})
+        self.http("/counted/", BROWSER, method="HEAD")
+        self.http("/counted/missing.html", BROWSER)  # a 404
+        self.http("/counted/", {**BROWSER, "Sec-Fetch-Dest": "iframe"})  # a game shown in a frame on another page
+        self.assertEqual(self.visits("counted"), 3)
+
+    def test_only_an_admin_gets_a_dashboard(self):
+        names = lambda key: [t["name"] for t in self.list_tools(key)]
+        self.assertIn("dashboard_link", names(ADMIN))
+        self.assertNotIn("dashboard_link", names(KEY))
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "dashboard_link", "arguments": {}}}).encode()
+        req = urllib.request.Request(self.base + "/mcp", body, {"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"})
+        with urllib.request.urlopen(req) as r:
+            self.assertIn("Unknown tool", json.load(r)["error"]["message"])
+
+    def list_tools(self, key):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+        req = urllib.request.Request(self.base + "/mcp", body, {"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req) as r:
+            return json.load(r)["result"]["tools"]
+
+    def test_the_dashboard_shows_every_site_and_the_settings_but_no_key(self):
+        self.ok("publish_site", {"html": "<title>x</title><input type=password>", "site": "ada-login", "title": "<b>bold</b>"})
+        self.ok("publish_site", {"html": "y", "site": "bob-game"}, key=KEY2)
+        self.http("/bob-game/", BROWSER)
+        code, body, headers = self.http(self.dashboard())
+        page = body.decode()
+        self.assertEqual(code, 200)
+        for text in ("ada-login", "bob-game", "https://pages.example.com/bob-game/", "password field", "/moderation/takedown/ada-login/",
+                     "MAX_SITE_MB", "ada, bob, root", "rel=\"noopener noreferrer\""):
+            self.assertIn(text, page)
+        self.assertIn("&lt;b&gt;bold&lt;/b&gt;", page)
+        for secret in (KEY, KEY2, ADMIN):
+            self.assertNotIn(secret, page)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+
+    def test_the_dashboard_counts_publishes_per_agent(self):
+        self.ok("publish_site", {"html": "1", "site": "tally"}, key=KEY2)
+        self.ok("publish_site", {"html": "2", "site": "tally"}, key=KEY2)
+        self.ok("restore_site", {"site": "tally", "version": 1}, key=KEY2)
+        code, body, _ = self.http(self.dashboard() + "?format=json")
+        data = json.loads(body)
+        bob = next(a for a in data["agents"] if a["agent"] == "bob")
+        self.assertGreaterEqual(bob["publishes_7d"], 3)
+        self.assertEqual(data["days"][-1]["day"], time.strftime("%Y-%m-%d", time.gmtime()))
+        self.assertNotIn(KEY2, body.decode())
+
+    def test_a_dashboard_link_cannot_be_forged_or_kept(self):
+        path = self.dashboard()
+        _, _, name, expires, sig = path.rsplit("/", 4)
+        self.assertEqual(self.http(path[:-1] + ("0" if sig[-1] != "0" else "1"))[0], 404)
+        self.assertEqual(self.http(path.replace("/root/", "/ada/"))[0], 404)
+        secret = __import__("hashlib").sha256(ADMIN.encode()).digest()
+        sign = lambda who, when: __import__("hmac").new(secret, f"dashboard:{who}:{when}".encode(), "sha256").hexdigest()[:32]
+        past = int(time.time()) - 10
+        self.assertEqual(self.http(f"/moderation/dashboard/root/{past}/{sign('root', past)}")[0], 404)
+        far = int(time.time()) + 86400 * 365  # longer than DASHBOARD_MINUTES allows, even if signed
+        self.assertEqual(self.http(f"/moderation/dashboard/root/{far}/{sign('root', far)}")[0], 404)
+        self.assertEqual(self.http(f"/moderation/dashboard/root/{expires}/{sign('root', int(expires))}")[0], 200)
+
+
+class CountsSurviveARestart(unittest.TestCase):
+    def test_counts_are_written_when_the_server_stops(self):
+        with tempfile.TemporaryDirectory() as data:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            env = {**os.environ, "DATA_DIR": data, "PORT": str(port), "MCP_KEYS": f"ada:{KEY}", "PUBLIC_URL": "https://pages.example.com",
+                   "STATS_FLUSH_SECONDS": "3600"}
+
+            def start():
+                proc = subprocess.Popen([sys.executable, "server.py"], cwd=APP, env=env, stdout=subprocess.DEVNULL)
+                for _ in range(100):
+                    try:
+                        urllib.request.urlopen(f"http://127.0.0.1:{port}/health")
+                        return proc
+                    except OSError:
+                        time.sleep(0.05)
+                raise RuntimeError("server did not start")
+
+            h = Harness()
+            h.base = f"http://127.0.0.1:{port}"
+            proc = start()
+            try:
+                h.ok("publish_site", {"html": "x", "site": "kept"})
+                h.http("/kept/", BROWSER)
+                h.http("/kept/", BROWSER)
+            finally:
+                proc.terminate()
+                proc.wait()
+            proc = start()
+            try:
+                self.assertEqual(h.ok("list_sites")["sites"][0]["visits_7d"], 2)
+            finally:
+                proc.terminate()
+                proc.wait()
