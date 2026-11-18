@@ -573,7 +573,7 @@ BROWSER = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KH
 
 class StartPageAndDashboard(Harness):
     """What a person sees at the root, what counts as a visit, and the admin's dashboard link."""
-    EXTRA = {"HOME_CACHE_SECONDS": "0", "STATS_FLUSH_SECONDS": "0"}
+    EXTRA = {"HOME_CACHE_SECONDS": "0", "STATS_FLUSH_SECONDS": "0", "TRUSTED_PROXY_HEADER": "X-Real-IP"}
 
     def dashboard(self, key=ADMIN):
         out = self.ok("dashboard_link", key=key)
@@ -606,6 +606,8 @@ class StartPageAndDashboard(Harness):
             self.assertIn(f'id="{theme}"', page)
         self.assertIn('<link rel="icon" href="data:image/svg+xml,', page)
         self.assertEqual(headers["X-Frame-Options"], "DENY")
+        self.assertIn("visitors, 7 days", page)
+        self.assertIn("<polyline", page)  # the visitors line over the visits bars
 
     def test_a_page_view_in_a_browser_is_a_visit_and_nothing_else_is(self):
         self.ok("publish_site", {"files": {"index.html": "<p>hi</p>", "app.js": "1", "more.html": "m"}, "site": "counted"})
@@ -620,6 +622,34 @@ class StartPageAndDashboard(Harness):
         self.http("/counted/missing.html", BROWSER)  # a 404
         self.http("/counted/", {**BROWSER, "Sec-Fetch-Dest": "iframe"})  # a game shown in a frame on another page
         self.assertEqual(self.visits("counted"), 3)
+
+    def test_visitors_are_people_per_day_and_a_referrer_is_only_its_domain(self):
+        self.ok("publish_site", {"files": {"index.html": "<p>hi</p>", "more.html": "m"}, "site": "shared"})
+        visit = lambda ip, path="/shared/", **h: self.http(path, {**BROWSER, "X-Real-IP": ip, **h})
+        visit("10.0.0.1")
+        visit("10.0.0.1", "/shared/more.html", Referer=f"{self.base}/shared/")  # a click inside the site
+        visit("10.0.0.2", Referer="https://www.linkedin.com/feed/update/urn:li:activity:7?trk=secret-campaign")
+        visit("10.0.0.3", Referer="https://news.example.org/a/b")
+        visit("10.0.0.4", Referer="javascript:alert(1)")
+        visit("10.0.0.5", Referer="https://bad<host>.example/")
+        # The same address in another browser is another visitor
+        self.http("/shared/", {**BROWSER, "X-Real-IP": "10.0.0.1", "User-Agent": "Mozilla/5.0 (iPhone) Safari/604.1"})
+        mine = next(s for s in self.ok("list_sites")["sites"] if s["site"] == "shared")
+        self.assertEqual(mine["visits_7d"], 7)
+        self.assertEqual(mine["visitors_7d"], 6)
+        self.assertEqual(mine["referrers_7d"], {"linkedin.com": 1, "news.example.org": 1})
+        code, body, _ = self.http(self.dashboard() + "?format=json")
+        data = json.loads(body)
+        linkedin = next(r for r in data["referrers"] if r["domain"] == "linkedin.com")
+        self.assertEqual((linkedin["visits_30d"], linkedin["sites"]), (1, [["shared", 1]]))
+        self.assertEqual(data["days"][-1]["visitors"], data["history"][-1]["visitors"])
+        self.assertGreaterEqual(data["totals"]["visitors_7d"], 6)
+        for kept_nowhere in ("10.0.0.", "secret-campaign", "urn:li", "iPhone", "javascript"):
+            self.assertNotIn(kept_nowhere, body.decode())
+        page = self.http(self.dashboard())[1].decode()
+        self.assertIn("Where visitors came from", page)
+        self.assertIn("news.example.org", page)
+        self.assertNotIn("bad&lt;host", page)
 
     def test_only_an_admin_gets_a_dashboard(self):
         names = lambda key: [t["name"] for t in self.list_tools(key)]
@@ -675,6 +705,55 @@ class StartPageAndDashboard(Harness):
         far = int(time.time()) + 86400 * 365  # longer than DASHBOARD_MINUTES allows, even if signed
         self.assertEqual(self.http(f"/moderation/dashboard/root/{far}/{sign('root', far)}")[0], 404)
         self.assertEqual(self.http(f"/moderation/dashboard/root/{expires}/{sign('root', int(expires))}")[0], 200)
+
+
+class VisitorCounting(unittest.TestCase):
+    """Stats on its own: what a day file holds, a new salt each day, and the caps that keep it small."""
+
+    def test_a_day_file_holds_numbers_and_domains_only(self):
+        import importlib
+        sys.path.insert(0, APP)
+        stats = importlib.import_module("stats")
+        with tempfile.TemporaryDirectory() as data:
+            s = stats.Stats(data, flush_seconds=0)
+            s.visit("game", "192.0.2.7\nMozilla/5.0 Firefox", "linkedin.com")
+            s.visit("game", "192.0.2.7\nMozilla/5.0 Firefox", None)
+            s.visit("game", "192.0.2.8\nMozilla/5.0 Firefox", None)
+            s.flush()
+            name = os.listdir(os.path.join(data, "stats"))[0]
+            with open(os.path.join(data, "stats", name)) as f:
+                text = f.read()
+            self.assertNotIn("192.0.2", text)
+            self.assertNotIn("Firefox", text)
+            day = json.loads(text)
+            self.assertEqual((day["visits"], day["visitors"], day["visitors_all"], day["referrers"]),
+                             ({"game": 3}, {"game": 2}, 2, {"game": {"linkedin.com": 1}}))
+            # A new day gets a new salt, so yesterday's visitor is a new visitor today
+            real = stats.today
+            try:
+                stats.today = lambda: "2999-01-01"
+                s.visit("game", "192.0.2.7\nMozilla/5.0 Firefox", None)
+                self.assertEqual(s.days["2999-01-01"]["visitors"], {"game": 1})
+            finally:
+                stats.today = real
+            # Past MAX_REFERRERS domains a site's day folds the rest into "other"
+            for i in range(stats.MAX_REFERRERS + 5):
+                s.visit("busy", None, f"site{i}.example")
+            r = s.last(1)[0][1]["referrers"]["busy"]
+            self.assertEqual(len(r), stats.MAX_REFERRERS + 1)
+            self.assertEqual(r["other"], 5)
+
+    def test_old_day_files_without_visitors_still_load(self):
+        sys.path.insert(0, APP)
+        stats = __import__("stats")
+        with tempfile.TemporaryDirectory() as data:
+            os.makedirs(os.path.join(data, "stats"))
+            day = stats.today()
+            with open(os.path.join(data, "stats", f"{day}.json"), "w") as f:
+                json.dump({"visits": {"old": 4}, "publishes": {"ada": 1}}, f)
+            s = stats.Stats(data, flush_seconds=0)
+            got = s.last(1)[0][1]
+            self.assertEqual((got["visits"], got["visitors"], got["visitors_all"], got["referrers"]), ({"old": 4}, {}, 0, {}))
 
 
 class CountsSurviveARestart(unittest.TestCase):

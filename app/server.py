@@ -20,7 +20,7 @@ Environment:
   DANGER_MAX_SITE_MB, DANGER_PUBLISHES_PER_HOUR   limits for publishing without a key (default 5 MB, 20 per address)
   ADMIN_AGENTS   names from MCP_KEYS, comma separated: they can list every site and take any site down, read
                  GET /moderation/feed with their key, and get a link to the dashboard
-  TRUSTED_PROXY_HEADER  e.g. X-Real-IP, the visitor's address when behind a proxy (for those limits)
+  TRUSTED_PROXY_HEADER  e.g. X-Real-IP, the visitor's address when behind a proxy (for those limits, and to tell visitors apart)
   DATA_DIR/PORT  default /data, 8000
 
 Routes: / (what this server is, its limits and totals) | POST /mcp | POST /upload/<token> | /moderation/... | /health |
@@ -353,9 +353,14 @@ TAKEDOWN_PAGE = """<!doctype html><meta charset="utf-8"><meta name="viewport" co
 
 def t_list(args, who):
     owner = owner_for(args, who, False)[0]
-    seen = visits_by_site(7)
-    return {"sites": [{**summary(m), "visits_7d": seen.get(m["name"], 0)} for m in store.all() if m["owner"] == owner],
-            "note": "visits_7d counts page views in a browser over the last seven days, not people."}
+    week = stats.last(7)
+    seen, people, refs = per_site(week, "visits"), per_site(week, "visitors"), referrers_by_site(week)
+    return {"sites": [{**summary(m), "visits_7d": seen.get(m["name"], 0), "visitors_7d": people.get(m["name"], 0),
+                       "referrers_7d": dict(sorted(refs.get(m["name"], {}).items(), key=lambda kv: -kv[1])[:5])}
+                      for m in store.all() if m["owner"] == owner],
+            "note": "Last seven days, in a browser: visits_7d counts page views, visitors_7d people per day added up "
+                    "(someone who comes back the next day counts again), referrers_7d the sites visitors came from "
+                    "(a visit with none came straight from a link in a message, an app or the address bar)."}
 
 
 def t_read(args, who):
@@ -455,7 +460,7 @@ TOOLS = [
      "restore_site brings it back.",
      {"folder": {**S, "description": "Path to the folder, with index.html at the top"},
       "site": {**S, "description": "The site to update, or a name you want for a new one"}, "title": S, **ET}, []),
-    ("list_sites", t_list, "The sites you have published, with their links.", {**ET}, []),
+    ("list_sites", t_list, "The sites you have published, with their links, and their visits, visitors and referring sites over seven days.", {**ET}, []),
     ("read_site", t_read, "A site's list of files, or one file with path. Read before you change something you published earlier.",
      {"site": S, "path": S}, ["site"]),
     ("list_versions", t_versions, "The live version of one of your sites and the earlier ones that are kept, newest first, with when "
@@ -528,12 +533,42 @@ PAGE_HEADERS = {"X-Robots-Tag": "noindex", "X-Frame-Options": "DENY",
                                            "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}
 
 
-def visits_by_site(days):
+def per_site(days, kind):
+    """kind ("visits" or "visitors") per site, added up over days, a list from stats.last()."""
     out = {}
-    for _, d in stats.last(days):
-        for site, n in d["visits"].items():
+    for _, d in days:
+        for site, n in d[kind].items():
             out[site] = out.get(site, 0) + n
     return out
+
+
+def referrers_by_site(days):
+    out = {}
+    for _, d in days:
+        for site, r in d["referrers"].items():
+            mine = out.setdefault(site, {})
+            for host, n in r.items():
+                mine[host] = mine.get(host, 0) + n
+    return out
+
+
+def day_row(day, d):
+    return {"day": day, "visits": sum(d["visits"].values()), "visitors": d["visitors_all"], "publishes": sum(d["publishes"].values())}
+
+
+REF_HOST = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)*$")
+
+
+def referrer_domain(referer, own_host):
+    """The domain a visit came from, without www., or None: no Referer, this same host (a click inside the site),
+    or anything that is not a plain host name."""
+    try:
+        host = (urllib.parse.urlsplit(referer or "").hostname or "").rstrip(".")
+    except ValueError:
+        return None
+    if not host or len(host) > 100 or not REF_HOST.match(host) or host == own_host:
+        return None
+    return host[4:] if host.startswith("www.") and host.count(".") > 1 else host
 
 
 def owner_label(meta):
@@ -543,15 +578,20 @@ def owner_label(meta):
 def overview(detail=False):
     """Totals for the start page; with detail, every site and agent for the dashboard."""
     sites = sorted(store.all(), key=lambda m: m["updated"], reverse=True)
-    days = stats.last(30)
-    v7, v30 = visits_by_site(7), visits_by_site(30)
+    history = stats.last(max(30, min(stats.keep_days, 90)) if detail else 30)
+    days = history[-30:]
+    while len(history) > 30 and not (history[0][1]["visits"] or history[0][1]["publishes"]):
+        history = history[1:]  # the dashboard's chart starts on the first day with anything in it
+    v7, v30 = per_site(days[-7:], "visits"), per_site(days, "visits")
+    u7, u30 = per_site(days[-7:], "visitors"), per_site(days, "visitors")
     count = lambda kind, n, key=None: sum(v for _, d in days[-n:] for k, v in d[kind].items() if key is None or k == key)
     keyed = {m["owner"] for m in sites if not m["owner"].startswith("anonymous:")}
     c = {"totals": {"sites": len(sites), "anonymous_sites": sum(1 for m in sites if m["owner"].startswith("anonymous:")),
                     "agents": len(keyed), "bytes": sum(e["size"] for m in sites for e in m["files"].values()),
                     "publishes_7d": count("publishes", 7), "publishes_30d": count("publishes", 30),
-                    "visits_7d": sum(v7.get(m["name"], 0) for m in sites), "visits_30d": sum(v30.get(m["name"], 0) for m in sites)},
-         "days": [{"day": day, "visits": sum(d["visits"].values()), "publishes": sum(d["publishes"].values())} for day, d in days],
+                    "visits_7d": sum(v7.get(m["name"], 0) for m in sites), "visits_30d": sum(v30.get(m["name"], 0) for m in sites),
+                    "visitors_7d": sum(d["visitors_all"] for _, d in days[-7:]), "visitors_30d": sum(d["visitors_all"] for _, d in days)},
+         "days": [day_row(day, d) for day, d in days],
          "danger": DANGER, "site_domain": SITE_DOMAIN, "public_url": PUBLIC_URL, "version": VERSION, "docs": DOCS_URL}
     if not detail:
         return c
@@ -561,7 +601,8 @@ def overview(detail=False):
         rows.append({"name": m["name"], "url": url_of(m), "title": m["title"], "page_title": r["page_title"], "owner": owner_label(m),
                      "version": m.get("version", 1), "kept": len(store.versions(m["name"])), "files": len(m["files"]),
                      "bytes": sum(e["size"] for e in m["files"].values()), "updated": m["updated"],
-                     "visits_7d": v7.get(m["name"], 0), "visits_30d": v30.get(m["name"], 0), "signals": r["signals"],
+                     "visits_7d": v7.get(m["name"], 0), "visits_30d": v30.get(m["name"], 0),
+                     "visitors_7d": u7.get(m["name"], 0), "visitors_30d": u30.get(m["name"], 0), "signals": r["signals"],
                      "takedown": takedown_url(m)})
     agents = {}
     for s in rows:
@@ -575,6 +616,17 @@ def overview(detail=False):
             agents.setdefault(who, {"agent": who, "sites": 0, "bytes": 0, "visits_7d": 0, "visits_30d": 0})
     for a in agents.values():
         a["publishes_7d"], a["publishes_30d"] = count("publishes", 7, a["agent"]), count("publishes", 30, a["agent"])
+    # Where visitors came from, over 30 days: each domain with its visits and the sites it sent them to.
+    refs, r7 = {}, referrers_by_site(days[-7:])
+    for site, r in referrers_by_site(days).items():
+        for host, n in r.items():
+            x = refs.setdefault(host, {"domain": host, "visits_7d": 0, "visits_30d": 0, "sites": {}})
+            x["visits_30d"] += n
+            x["visits_7d"] += r7.get(site, {}).get(host, 0)
+            x["sites"][site] = x["sites"].get(site, 0) + n
+    referred, referred_7d = sum(x["visits_30d"] for x in refs.values()), sum(x["visits_7d"] for x in refs.values())
+    referrers = [{**x, "sites": sorted(x["sites"].items(), key=lambda kv: -kv[1])}
+                 for x in sorted(refs.values(), key=lambda x: (-x["visits_30d"], x["domain"]))]
     disk = 0
     for folder, _, files in os.walk(store.root):
         for f in files:
@@ -582,7 +634,9 @@ def overview(detail=False):
                 disk += os.path.getsize(os.path.join(folder, f))
             except OSError:
                 pass
-    return {**c, "sites": rows, "disk": disk,
+    return {**c, "sites": rows, "disk": disk, "history": [day_row(day, d) for day, d in history],
+            "referrers": referrers, "direct_30d": max(0, sum(d["visits"] for d in c["days"]) - referred),
+            "direct_7d": max(0, sum(d["visits"] for d in c["days"][-7:]) - referred_7d),
             "agents": sorted(agents.values(), key=lambda a: (a["agent"] == "anonymous", -a["sites"], a["agent"]))}
 
 
@@ -602,9 +656,9 @@ def settings():
         ("MAX_FILES", str(store.max_files), "500", "Files in a site."),
         ("MAX_SITES", str(store.max_sites), "500", "Sites on this server."),
         ("KEEP_VERSIONS", str(store.keep_versions), "10", "Earlier versions kept per site, for restore_site."),
-        ("STATS_DAYS", str(stats.keep_days), "90", "Days of visit and publish counts kept."),
+        ("STATS_DAYS", str(stats.keep_days), "90", "Days of visit, visitor, referrer and publish counts kept."),
         ("DASHBOARD_MINUTES", str(DASHBOARD_SECONDS // 60), "60", "How long a link from dashboard_link works."),
-        ("TRUSTED_PROXY_HEADER", env("TRUSTED_PROXY_HEADER", "(not set)"), "", "Header with the visitor's address behind a proxy, for the limits without a key."),
+        ("TRUSTED_PROXY_HEADER", env("TRUSTED_PROXY_HEADER", "(not set)"), "", "Header with the visitor's address behind a proxy, for the limits without a key and to tell visitors apart."),
     ]
 
 
@@ -650,13 +704,17 @@ class Handler(BaseHTTPRequestHandler):
     def redirect(self, location, code=301):
         self.send(code, b"", headers={"Location": location, "Cache-Control": "no-cache"})
 
+    def host(self):
+        """The Host header without a port, lower case."""
+        host = (self.headers.get("Host") or "").strip().lower()
+        return (host.rpartition(":")[0] if re.search(r":\d+$", host) else host).rstrip(".")
+
     def site_label(self):
         """The site this request's host names, '' for a host under SITE_DOMAIN that is not one, or None for every
         other host (this server's own address, a container name, an IP)."""
         if not SITE_DOMAIN:
             return None
-        host = (self.headers.get("Host") or "").strip().lower()
-        host = (host.rpartition(":")[0] if re.search(r":\d+$", host) else host).rstrip(".")
+        host = self.host()
         if not host.endswith("." + SITE_DOMAIN):
             return None
         label = host[:-len(SITE_DOMAIN) - 1]
@@ -751,7 +809,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(404, b"This site has no such page.\n")
         data, entry = found
         if code == 200 and self.is_visit(path):
-            stats.visit(name)
+            stats.visit(name, f"{self.ip()}\n{self.headers.get('User-Agent', '')}",
+                        referrer_domain(self.headers.get("Referer"), self.host()))
         etag = f'"{entry["sha"][:32]}"'
         headers = {"ETag": etag, "Cache-Control": "no-cache", "X-Robots-Tag": "noindex", "Referrer-Policy": "strict-origin-when-cross-origin"}
         if code == 200 and self.headers.get("If-None-Match") == etag:

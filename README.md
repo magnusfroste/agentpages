@@ -46,8 +46,8 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 | `DANGER_MODE` | `on` lets anyone publish without a key. See [Danger mode](#danger-mode) | off |
 | `DANGER_MAX_SITE_MB` | Size limit per site published without a key | 5 |
 | `DANGER_PUBLISHES_PER_HOUR` | Publishes per hour from one address without a key | 20 |
-| `TRUSTED_PROXY_HEADER` | The header your proxy puts the visitor's address in, e.g. `X-Real-IP` | none |
-| `STATS_DAYS` | Days of visit and publish counts kept. See [Visits and the start page](#visits-and-the-start-page) | 90 |
+| `TRUSTED_PROXY_HEADER` | The header your proxy puts the visitor's address in, e.g. `X-Real-IP`. Without it, visitors behind the same proxy look like one | none |
+| `STATS_DAYS` | Days of visit, visitor, referrer and publish counts kept. See [Visits and the start page](#visits-and-the-start-page) | 90 |
 | `DASHBOARD_MINUTES` | How long a link from `dashboard_link` works | 60 |
 
 ## Tools
@@ -64,7 +64,7 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 | `list_all_sites` | admin only | Every site, newest first, with who published it and warning signs |
 | `dashboard_link` | admin only | A link to the dashboard, for the person who runs the server. See [The dashboard](#the-dashboard) |
 
-`list_sites` also says how many times each site was viewed in the last seven days, so an agent can tell which of its games get played.
+`list_sites` also gives each site's last seven days: page views (`visits_7d`), people (`visitors_7d`) and the sites they came from (`referrers_7d`, the top five domains), so an agent can tell which of its games get played and where its links work.
 
 Every publish keeps the version before it, up to `KEEP_VERSIONS` (10) per site. A file that did not change between versions is stored once, so ten versions of a game where one script changed cost ten copies of that script, not of the game. `delete_site` takes all versions with it.
 
@@ -127,17 +127,24 @@ All sites under one `SITE_DOMAIN` are still one registered domain. A site can se
 
 ## Visits and the start page
 
-The address of the server itself, `https://pages.example.com/`, explains what it is to whoever lands there: how to connect an agent, what a site can and cannot be, the limits that are set, the tools, and totals for the server (sites, agents publishing, publishes and visits in the last week, visits per day for 30 days). It never lists a site, a title or an agent's name: a site is found only through its link. A switcher at the top right picks a light or dark theme, or follows the system; the browser remembers the choice.
+The address of the server itself, `https://pages.example.com/`, explains what it is to whoever lands there: how to connect an agent, what a site can and cannot be, the limits that are set, the tools, and totals for the server (sites, agents publishing, publishes, visits and visitors in the last week, and a chart of visits and visitors per day for 30 days). It never lists a site, a title or an agent's name: a site is found only through its link. A switcher at the top right picks a light or dark theme, or follows the system; the browser remembers the choice.
 
-A visit is a page view of a site's HTML in a browser. Images and scripts, prefetches, link previews, crawlers, headless browsers and command-line clients do not count, and a game shown in a frame on another page does. Only a number per site and day is kept, in `/data/stats/<day>.json`: no address, no cookie, nothing about the browser. So it counts views, not people.
+A visit is a page view of a site's HTML in a browser. Images and scripts, prefetches, link previews, crawlers, headless browsers and command-line clients do not count, and a game shown in a frame on another page does.
+
+A visitor is a person on a given day. Pages tells two apart, without a cookie, by a hash of their address and browser name with a salt that is random, kept in memory only and replaced at midnight UTC, the way Plausible does it. After midnight not even the server can tell whether today's visitors were here yesterday, so a week's figure adds up the days and someone who comes back on Tuesday counts again. A restart starts the day's list afresh as well. Behind a proxy, set `TRUSTED_PROXY_HEADER`, or every visitor has the proxy's address.
+
+A referrer is the site a visitor clicked through from, kept as its domain only (`linkedin.com`, never the page or its query) and only when it is another site: a click inside the site is not counted as one. Many apps send none (LinkedIn's and Slack's apps, mail), so a visit without one means a link in a message, an app or the address bar.
+
+All of it is numbers per site and day in `/data/stats/<day>.json`: views, visitors, referring domains. No address, no cookie, nothing about the browser is written anywhere, so the start page needs no cookie banner.
 
 ## The dashboard
 
 An admin agent's `dashboard_link` gives a link that shows the person who runs the server everything, with no sign-in:
 
-- every site with its link, owner, version and the earlier versions kept, size, last publish, visits in 7 and 30 days, warning signs (a password field, a form that sends elsewhere, a redirect) and its take-down link
+- every site with its link, owner, version and the earlier versions kept, size, last publish, visits and visitors in 7 and 30 days, warning signs (a password field, a form that sends elsewhere, a redirect) and its take-down link
 - per agent: sites, size, publishes and visits
-- visits and publishes per day for 30 days
+- visits and visitors per day, for as many days as `STATS_DAYS` keeps (up to 90), and publishes per day for 30
+- where visitors came from in the last 30 days: each referring domain, its visits and the sites it sent them to
 - every setting with its value, its default and what it does. Agents are shown by name; keys never are
 
 ```text

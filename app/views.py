@@ -13,9 +13,9 @@ e = html.escape
 
 CSS = """
 /* The theme: the system's unless the visitor picked one in the switcher at the top right. */
-:root{--bg:#fafaf8;--fg:#1c1e22;--muted:#5f646b;--line:#e2e2dd;--card:#fff;--accent:#2563a8;--warn:#a85a00;--bar:#3b7bc4;--zero:#d9d9d3;color-scheme:light}
-@media(prefers-color-scheme:dark){:root:not(:has(#t-light:checked)){--bg:#131518;--fg:#e7e7e5;--muted:#9a9fa6;--line:#2b2f35;--card:#1a1d21;--accent:#7fb2ee;--warn:#f0a65a;--bar:#6ea6e6;--zero:#343941;color-scheme:dark}}
-:root:has(#t-dark:checked){--bg:#131518;--fg:#e7e7e5;--muted:#9a9fa6;--line:#2b2f35;--card:#1a1d21;--accent:#7fb2ee;--warn:#f0a65a;--bar:#6ea6e6;--zero:#343941;color-scheme:dark}
+:root{--bg:#fafaf8;--fg:#1c1e22;--muted:#5f646b;--line:#e2e2dd;--card:#fff;--accent:#2563a8;--warn:#a85a00;--bar:#2a78d6;--line2:#eb6834;--zero:#e4e4df;--hover:rgba(0,0,0,.05);color-scheme:light}
+@media(prefers-color-scheme:dark){:root:not(:has(#t-light:checked)){--bg:#131518;--fg:#e7e7e5;--muted:#9a9fa6;--line:#2b2f35;--card:#1a1d21;--accent:#7fb2ee;--warn:#f0a65a;--bar:#3987e5;--line2:#d95926;--zero:#30353b;--hover:rgba(255,255,255,.06);color-scheme:dark}}
+:root:has(#t-dark:checked){--bg:#131518;--fg:#e7e7e5;--muted:#9a9fa6;--line:#2b2f35;--card:#1a1d21;--accent:#7fb2ee;--warn:#f0a65a;--bar:#3987e5;--line2:#d95926;--zero:#30353b;--hover:rgba(255,255,255,.06);color-scheme:dark}
 .theme{position:absolute;top:1rem;right:1rem;display:flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:99px;background:var(--card);margin:0}
 .theme input{position:absolute;opacity:0;pointer-events:none}
 .theme label{display:grid;place-items:center;width:2rem;height:1.75rem;border-radius:99px;color:var(--muted);cursor:pointer}
@@ -42,9 +42,19 @@ p,li{max-width:52rem}
 .num span{color:var(--muted);font-size:.85rem}
 .chart{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.8rem .9rem .5rem}
 .chart svg{display:block;width:100%;height:72px}
+.chart svg.tall{height:150px}
 .chart rect{fill:var(--bar)}
 .chart rect.z{fill:var(--zero)}
-.axis{display:flex;justify-content:space-between;color:var(--muted);font-size:.78rem;margin-top:.3rem}
+.chart rect.hit{fill:transparent}
+.chart rect.hit:hover{fill:var(--hover)}
+.chart polyline{fill:none;stroke:var(--line2);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;pointer-events:none}
+.legend{display:flex;flex-wrap:wrap;gap:.3rem 1.1rem;font-size:.82rem;color:var(--muted);margin:0 0 .5rem}
+.legend i{display:inline-block;width:.75rem;height:.75rem;border-radius:3px;background:var(--bar);margin-right:.35rem;vertical-align:-.08rem}
+.legend i.l{height:3px;border-radius:2px;background:var(--line2);vertical-align:.2rem}
+.legend .top{margin-left:auto}
+.axis{display:flex;justify-content:space-between;gap:.6rem;color:var(--muted);font-size:.78rem;margin-top:.3rem}
+.axis span{white-space:nowrap}
+.axis span:nth-child(2){white-space:normal;text-align:center}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.75rem .9rem;overflow-x:auto;font-size:.85rem;margin:.5rem 0}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}
 ul{padding-left:1.2rem;margin:.4rem 0}
@@ -119,6 +129,34 @@ def bars(days, key, what):
             f'<span>{e(days[-1]["day"])}</span></div></div>')
 
 
+def traffic(days):
+    """Visits per day as bars and visitors per day as a line, one scale for both, as inline SVG. Hovering a day
+    shows its numbers; the tables on the dashboard carry the same counts as text."""
+    top = max([d["visits"] for d in days] + [d["visitors"] for d in days] + [1])
+    w, h = 10, 100
+    y = lambda v: h - (h - 2) * v / top
+    parts, points = [], []
+    for i, d in enumerate(days):
+        v, u = d["visits"], d["visitors"]
+        if v:
+            parts.append(f'<rect x="{i * w + 1.5}" y="{y(v):.1f}" width="{w - 3}" height="{h - y(v):.1f}" rx="1.5"/>')
+        else:
+            parts.append(f'<rect class=z x="{i * w + 1.5}" y="{h - 1.5}" width="{w - 3}" height="1.5"/>')
+        points.append(f"{i * w + w / 2:.1f},{y(u):.1f}")
+    hits = "".join(f'<rect class=hit x="{i * w}" y="0" width="{w}" height="{h}"><title>{e(d["day"])}: {d["visits"]} visit'
+                   f'{"" if d["visits"] == 1 else "s"}, {d["visitors"]} visitor{"" if d["visitors"] == 1 else "s"}</title></rect>'
+                   for i, d in enumerate(days))
+    line = f'<polyline points="{" ".join(points)}" vector-effect="non-scaling-stroke"/>' if len(days) > 1 else ""
+    visits, visitors = sum(d["visits"] for d in days), sum(d["visitors"] for d in days)
+    return (f'<div class="chart"><div class="legend"><span><i></i>Visits (page views)</span><span><i class="l"></i>Visitors</span>'
+            f'<span class="top">{visits} visits, {visitors} visitors in {len(days)} days</span></div>'
+            f'<svg class="tall" viewBox="0 0 {len(days) * w} {h}" preserveAspectRatio="none" role="img" '
+            f'aria-label="Visits and visitors per day, {len(days)} days: {visits} visits, {visitors} visitors">'
+            f'{"".join(parts)}{line}{hits}</svg>'
+            f'<div class="axis"><span>{e(days[0]["day"])}</span><span>top: {top} a day</span>'
+            f'<span>{e(days[-1]["day"])}</span></div></div>')
+
+
 def when(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M")
 
@@ -149,8 +187,8 @@ def home(c):
 <p>Got a link from someone? It goes straight to their site. Nothing here is listed: a site is found only through its link.</p>
 
 <h2>On this server</h2>
-<div class="nums">{num(t["sites"], "sites")}{num(t["agents"], "agents publishing")}{num(t["publishes_7d"], "publishes, last 7 days")}{num(t["visits_7d"], "visits, last 7 days")}{num(size(t["bytes"]), "published")}</div>
-{bars(c["days"], "visits", "visits")}
+<div class="nums">{num(t["sites"], "sites")}{num(t["agents"], "agents publishing")}{num(t["publishes_7d"], "publishes, 7 days")}{num(t["visits_7d"], "visits, 7 days")}{num(t["visitors_7d"], "visitors, 7 days")}{num(size(t["bytes"]), "published")}</div>
+{traffic(c["days"])}
 
 <h2>Connect your agent</h2>
 <p>AgentPages is an MCP server at <code>{e(mcp)}</code>.</p>
@@ -188,8 +226,15 @@ def home(c):
 <ul>{tools}</ul>
 <p class="sub">Admins also get <code>list_all_sites</code> and <code>dashboard_link</code>.</p></div></div>
 
-<footer>AgentPages {e(c["version"])} · <a href="{e(c["docs"])}" rel="noreferrer">Documentation</a> · visits count page views in a browser, not people, and nothing about a visitor is kept.</footer>"""
+<footer>AgentPages {e(c["version"])} · <a href="{e(c["docs"])}" rel="noreferrer">Documentation</a> · Visits count page views in a browser; visitors count people per day, told apart without cookies by a code that is thrown away at midnight. Nothing about a visitor is kept.</footer>"""
     return page("AgentPages", body)
+
+
+def ref_row(r):
+    to = ", ".join(f'{e(site)} <span class=sub>{n}</span>' for site, n in r["sites"][:5])
+    if len(r["sites"]) > 5:
+        to += f' <span class=sub>and {len(r["sites"]) - 5} more</span>'
+    return f'<tr><td>{e(r["domain"])}</td><td class=n>{r["visits_7d"]}</td><td class=n>{r["visits_30d"]}</td><td>{to}</td></tr>'
 
 
 def dashboard(c):
@@ -210,9 +255,13 @@ def dashboard(c):
             f'<td>{e(s["owner"])}</td><td class=n>v{s["version"]}<div class=sub>{s["kept"]} kept</div></td>'
             f'<td class=n>{size(s["bytes"])}<div class=sub>{s["files"]} file{"" if s["files"] == 1 else "s"}</div></td><td class=n>{e(when(s["updated"]))}</td>'
             f'<td class=n>{s["visits_7d"]}<div class=sub>{s["visits_30d"]} in 30 d</div></td>'
+            f'<td class=n>{s["visitors_7d"]}<div class=sub>{s["visitors_30d"]} in 30 d</div></td>'
             f'<td>{f"<span class=warn>{e(signals)}</span>" if signals else "<span class=sub>none</span>"}</td>'
             f'<td><a href="{e(s["takedown"])}" target="_blank" rel="noopener noreferrer">take down</a></td></tr>')
-    sites = "".join(rows) or '<tr><td colspan=8 class=sub>No sites.</td></tr>'
+    sites = "".join(rows) or '<tr><td colspan=9 class=sub>No sites.</td></tr>'
+    refs = "".join(ref_row(r) for r in c["referrers"][:25])
+    refs += (f'<tr><td><i>No other site</i><div class=sub>a link in a message, an app or the address bar</div></td><td class=n>{c["direct_7d"]}</td>'
+             f'<td class=n>{c["direct_30d"]}</td><td class=sub>every site</td></tr>')
     settings = "".join(
         f'<tr><td><code>{e(k)}</code></td><td>{e(v)}</td><td class=sub>{e(d)}</td><td>{e(what)}</td></tr>' for k, v, d, what in c["settings"])
     body = f"""
@@ -221,10 +270,17 @@ def dashboard(c):
 <p>{mode}</p>
 <p class="note">This link was made for {e(c["for"])} and works until {e(c["expires"])} UTC. Anyone who has it sees everything here, so do not pass it on.</p>
 
-<div class="nums">{num(t["sites"], f'sites ({t["anonymous_sites"]} without a key)')}{num(t["agents"], "agents publishing")}{num(t["publishes_7d"], f'publishes, 7 days ({t["publishes_30d"]} in 30)')}{num(t["visits_7d"], f'visits, 7 days ({t["visits_30d"]} in 30)')}{num(size(t["bytes"]), f'live ({size(c["disk"])} on disk with versions)')}</div>
+<div class="nums">{num(t["sites"], f'sites ({t["anonymous_sites"]} without a key)')}{num(t["agents"], "agents publishing")}{num(t["publishes_7d"], f'publishes, 7 days ({t["publishes_30d"]} in 30)')}{num(t["visits_7d"], f'visits, 7 days ({t["visits_30d"]} in 30)')}{num(t["visitors_7d"], f'visitors, 7 days ({t["visitors_30d"]} in 30)')}{num(size(t["bytes"]), f'live ({size(c["disk"])} on disk with versions)')}</div>
 
-<h2>Visits per day</h2>
-{bars(c["days"], "visits", "visits")}
+<h2>Visits and visitors per day</h2>
+{traffic(c["history"])}
+
+<h2>Where visitors came from</h2>
+<p class="sub">The last 30 days, by the site a visitor clicked through from. Only its domain is kept. Many apps (LinkedIn, Slack, mail) send none, so their visits land under "No other site".</p>
+<div class="scroll"><table>
+<tr><th>From</th><th class=n>Visits 7 d</th><th class=n>30 d</th><th>To</th></tr>
+{refs}
+</table></div>
 <h2>Publishes per day</h2>
 {bars(c["days"], "publishes", "publishes")}
 
@@ -237,7 +293,7 @@ def dashboard(c):
 <h2>Every site</h2>
 <p class="sub">Newest first. Site content was written by whoever published it: open it with care. A take-down link asks once more before anything happens.</p>
 <div class="scroll"><table>
-<tr><th>Site</th><th>Owner</th><th class=n>Version</th><th class=n>Size</th><th class=n>Updated (UTC)</th><th class=n>Visits 7 d</th><th>Looks risky</th><th></th></tr>
+<tr><th>Site</th><th>Owner</th><th class=n>Version</th><th class=n>Size</th><th class=n>Updated (UTC)</th><th class=n>Visits 7 d</th><th class=n>Visitors 7 d</th><th>Looks risky</th><th></th></tr>
 {sites}
 </table></div>
 
@@ -248,5 +304,5 @@ def dashboard(c):
 {settings}
 </table></div>
 
-<footer>Visits count page views in a browser, not people; prefetches, link previews and bots are left out. Nothing about a visitor is kept. <a href="{e(c["docs"])}" rel="noreferrer">Documentation</a></footer>"""
+<footer>Visits count page views in a browser; prefetches, link previews and bots are left out. Visitors count people per day, told apart by a salted hash of address and browser that is thrown away at midnight UTC, so the 7- and 30-day figures add days up and someone who comes back on another day counts again. Nothing about a visitor is kept. <a href="{e(c["docs"])}" rel="noreferrer">Documentation</a></footer>"""
     return page("AgentPages dashboard", body, wide=True)
