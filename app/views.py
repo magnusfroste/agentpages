@@ -1,25 +1,39 @@
 """The two pages people read: the start page anyone sees, and the dashboard an admin gets a link to.
 
-Plain HTML and CSS, no script. Everything that comes from a published site (names, titles, text) is escaped.
+Plain HTML and CSS. The one script remembers the theme a visitor picked, and the Content-Security-Policy allows that
+script by its hash and nothing else. Everything that comes from a published site (names, titles, text) is escaped.
 """
+import base64
+import hashlib
 import html
+import urllib.parse
 from datetime import datetime, timezone
 
 e = html.escape
 
 CSS = """
-:root{--bg:#fafaf8;--fg:#1c1e22;--muted:#5f646b;--line:#e2e2dd;--card:#fff;--accent:#2563a8;--warn:#a85a00;--bar:#3b7bc4;--zero:#d9d9d3}
-@media(prefers-color-scheme:dark){:root{--bg:#131518;--fg:#e7e7e5;--muted:#9a9fa6;--line:#2b2f35;--card:#1a1d21;--accent:#7fb2ee;--warn:#f0a65a;--bar:#6ea6e6;--zero:#343941}}
+/* The theme: the system's unless the visitor picked one in the switcher at the top right. */
+:root{--bg:#fafaf8;--fg:#1c1e22;--muted:#5f646b;--line:#e2e2dd;--card:#fff;--accent:#2563a8;--warn:#a85a00;--bar:#3b7bc4;--zero:#d9d9d3;color-scheme:light}
+@media(prefers-color-scheme:dark){:root:not(:has(#t-light:checked)){--bg:#131518;--fg:#e7e7e5;--muted:#9a9fa6;--line:#2b2f35;--card:#1a1d21;--accent:#7fb2ee;--warn:#f0a65a;--bar:#6ea6e6;--zero:#343941;color-scheme:dark}}
+:root:has(#t-dark:checked){--bg:#131518;--fg:#e7e7e5;--muted:#9a9fa6;--line:#2b2f35;--card:#1a1d21;--accent:#7fb2ee;--warn:#f0a65a;--bar:#6ea6e6;--zero:#343941;color-scheme:dark}
+.theme{position:absolute;top:1rem;right:1rem;display:flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:99px;background:var(--card);margin:0}
+.theme input{position:absolute;opacity:0;pointer-events:none}
+.theme label{display:grid;place-items:center;width:2rem;height:1.75rem;border-radius:99px;color:var(--muted);cursor:pointer}
+.theme label:hover{color:var(--fg)}
+.theme input:checked+label{background:var(--bg);color:var(--fg);box-shadow:0 0 0 1px var(--line)}
+.theme input:focus-visible+label{outline:2px solid var(--accent);outline-offset:1px}
+.theme svg{width:1rem;height:1rem;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 *{box-sizing:border-box}
 html{background:var(--bg);color:var(--fg)}
 body{margin:0;font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-main{max-width:46rem;margin:0 auto;padding:3.5rem 1rem 4rem}
+main{max-width:66rem;margin:0 auto;padding:3.5rem 1.5rem 4rem}
 main.wide{max-width:76rem}
 h1{font-size:2rem;line-height:1.2;margin:0 0 .4rem}
 h2{font-size:1.1rem;margin:2.4rem 0 .7rem}
 p{margin:.5rem 0}
 a{color:var(--accent)}
-.lead{font-size:1.1rem;color:var(--muted);margin:0 0 1rem}
+.lead{font-size:1.15rem;color:var(--muted);margin:0 0 1rem;max-width:44rem}
+p,li{max-width:52rem}
 .pill{display:inline-block;font-size:.85rem;padding:.15rem .6rem;border-radius:99px;border:1px solid var(--line);background:var(--card)}
 .pill.open{border-color:var(--warn);color:var(--warn)}
 .nums{display:grid;grid-template-columns:repeat(auto-fit,minmax(7.5rem,1fr));gap:.6rem;margin:.8rem 0}
@@ -35,8 +49,9 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--card);border:1p
 code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}
 ul{padding-left:1.2rem;margin:.4rem 0}
 li{margin:.3rem 0}
-.cols{display:grid;grid-template-columns:1fr 1fr;gap:0 1.5rem}
-@media(max-width:40rem){.cols{grid-template-columns:1fr}}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:0 2.5rem;align-items:start}
+.cols>div>h2:first-child{margin-top:2.4rem}
+@media(max-width:48rem){.cols{grid-template-columns:1fr}}
 .scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
 table{border-collapse:collapse;width:100%;font-size:.9rem}
 th,td{text-align:left;padding:.5rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
@@ -50,9 +65,29 @@ footer{margin-top:3rem;color:var(--muted);font-size:.85rem}
 """
 
 
+ICON = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#2563a8"/>'
+        '<path d="M15 9h23l11 11v35H15z" fill="#fff"/><path d="M38 9v11h11" fill="#cfe0f5"/>'
+        '<path d="M23 30h18M23 38h18M23 46h10" stroke="#2563a8" stroke-width="4.5" stroke-linecap="round"/></svg>')
+FAVICON = "data:image/svg+xml," + urllib.parse.quote(ICON)
+
+SUN = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'
+MOON = '<svg viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>'
+AUTO = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg>'
+SWITCH = ('<form class="theme" aria-label="Theme">'
+          f'<input type="radio" name="theme" id="t-auto" value="auto" checked><label for="t-auto" title="Like your system">{AUTO}</label>'
+          f'<input type="radio" name="theme" id="t-light" value="light"><label for="t-light" title="Light">{SUN}</label>'
+          f'<input type="radio" name="theme" id="t-dark" value="dark"><label for="t-dark" title="Dark">{MOON}</label></form>')
+# Right after the switcher, so a remembered theme is set before anything below it is drawn.
+SCRIPT = ('(function(){var k="agentpages-theme";try{var r=document.getElementById("t-"+localStorage.getItem(k));if(r)r.checked=true}'
+          'catch(_){}document.querySelectorAll("input[name=theme]").forEach(function(i){i.addEventListener("change",function(){'
+          'try{localStorage.setItem(k,i.value)}catch(_){}})})})();')
+SCRIPT_HASH = "sha256-" + base64.b64encode(hashlib.sha256(SCRIPT.encode()).digest()).decode()
+
+
 def page(title, body, wide=False):
     return (f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-            f'<meta name="referrer" content="no-referrer"><title>{e(title)}</title><style>{CSS}</style>'
+            f'<meta name="referrer" content="no-referrer"><title>{e(title)}</title><link rel="icon" href="{FAVICON}">'
+            f'<style>{CSS}</style>{SWITCH}<script>{SCRIPT}</script>'
             f'<main{" class=wide" if wide else ""}>{body}</main></html>')
 
 
@@ -118,12 +153,13 @@ def home(c):
 {bars(c["days"], "visits", "visits")}
 
 <h2>Connect your agent</h2>
-<p>AgentPages is an MCP server at <code>{e(mcp)}</code>. In Hermes, add it to <code>config.yaml</code>:</p>
+<p>AgentPages is an MCP server at <code>{e(mcp)}</code>.</p>
+<div class="cols"><div><p>In Hermes, add it to <code>config.yaml</code>:</p>
 <pre><code>mcp_servers:
   pages:
-    url: "{e(mcp)}"{header}</code></pre>
-<p>In Claude Code:</p>
-<pre><code>claude mcp add --transport http pages {e(mcp)}{claude}</code></pre>
+    url: "{e(mcp)}"{header}</code></pre></div>
+<div><p>In Claude Code:</p>
+<pre><code>claude mcp add --transport http pages {e(mcp)}{claude}</code></pre></div></div>
 {key}
 <p>Then ask it to publish a folder. It gets one command for its terminal, so a whole game never passes through the chat.</p>
 
@@ -140,17 +176,17 @@ def home(c):
 <li>Search engines are asked not to index sites.</li>
 </ul></div></div>
 
-<h2>Limits</h2>
+<div class="cols"><div><h2>Limits</h2>
 <div class="scroll"><table>
 <tr><td>Size of a site</td><td class=n>{lim["site_mb"]} MB</td></tr>
 <tr><td>Files in a site</td><td class=n>{lim["files"]}</td></tr>
 <tr><td>Sites on this server</td><td class=n>{t["sites"]} of {lim["sites"]}</td></tr>
 <tr><td>Earlier versions kept</td><td class=n>{lim["versions"]} per site</td></tr>{danger_limits}
-</table></div>
+</table></div></div>
 
-<h2>Tools</h2>
+<div><h2>Tools</h2>
 <ul>{tools}</ul>
-<p class="sub">Admins also get <code>list_all_sites</code> and <code>dashboard_link</code>.</p>
+<p class="sub">Admins also get <code>list_all_sites</code> and <code>dashboard_link</code>.</p></div></div>
 
 <footer>AgentPages {e(c["version"])} · <a href="{e(c["docs"])}" rel="noreferrer">Documentation</a> · visits count page views in a browser, not people, and nothing about a visitor is kept.</footer>"""
     return page("AgentPages", body)

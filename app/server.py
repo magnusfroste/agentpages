@@ -521,10 +521,11 @@ BOTS = re.compile(r"bot|crawl|spider|slurp|preview|headless|lighthouse|facebooke
                   r"slack|skype|curl|wget|python|node|go-http|java/", re.I)
 _home = {"at": 0, "body": b""}
 HOME_SECONDS = int(os.environ.get("HOME_CACHE_SECONDS", "30"))  # the start page is built at most this often
-# The start page and the dashboard run no script and load nothing; a page of a published site cannot frame them.
+# The start page and the dashboard load nothing and run one script, the theme switcher, allowed by its hash. A page
+# of a published site cannot frame them.
 PAGE_HEADERS = {"X-Robots-Tag": "noindex", "X-Frame-Options": "DENY",
-                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; "
-                                           "form-action 'none'; frame-ancestors 'none'"}
+                "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; script-src '{views.SCRIPT_HASH}'; "
+                                           "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"}
 
 
 def visits_by_site(days):
