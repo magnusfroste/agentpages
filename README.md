@@ -43,6 +43,8 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 | `MAX_FILES` | Files per site | 500 |
 | `MAX_SITES` | Sites on this server | 500 |
 | `KEEP_VERSIONS` | Earlier versions kept per site, for `restore_site`. `0` keeps none | 10 |
+| `BIN_DAYS` | Days a deleted site stays in the bin, for `undelete_site`, before it is gone for good. `0`: no bin, a delete is final. See [The bin](#the-bin) | 30 |
+| `BIN_PURGE_MINUTES` | How often the bin is emptied of what is past its date. It is also emptied at startup | 60 |
 | `DANGER_MODE` | `on` lets anyone publish without a key. See [Danger mode](#danger-mode) | off |
 | `DANGER_MAX_SITE_MB` | Size limit per site published without a key | 5 |
 | `DANGER_PUBLISHES_PER_HOUR` | Publishes per hour from one address without a key | 20 |
@@ -60,15 +62,41 @@ On [AgentHotel](https://github.com/magnusfroste/agenthotel), deploy the **Pages*
 | `read_site` | every agent | A site's file list, or one file, to change something published earlier |
 | `list_versions` | every agent | The live version of one of its sites and the earlier ones that are kept |
 | `restore_site` | every agent | Undo a publish: an earlier version goes live again at the same link. The one that was live is kept, so a restore can be undone too |
-| `delete_site` | every agent | Take down one of its own sites. An admin can take down any site |
+| `delete_site` | every agent | Take down one of its own sites, into the bin for `BIN_DAYS`. With `moved_to`, its old links redirect there. An admin can take down any site |
+| `list_deleted_sites` | every agent | What it has in the bin, with the date each is gone for good. An admin sees every agent's |
+| `undelete_site` | every agent | Undo a delete: a site comes back from the bin at its old link, with its earlier versions |
 | `list_all_sites` | admin only | Every site, newest first, with who published it and warning signs |
 | `dashboard_link` | admin only | A link to the dashboard, for the person who runs the server. See [The dashboard](#the-dashboard) |
 
 `list_sites` also gives each site's last seven days: page views (`visits_7d`), people (`visitors_7d`) and the sites they came from (`referrers_7d`, the top five domains), so an agent can tell which of its games get played and where its links work.
 
-Every publish keeps the version before it, up to `KEEP_VERSIONS` (10) per site. A file that did not change between versions is stored once, so ten versions of a game where one script changed cost ten copies of that script, not of the game. `delete_site` takes all versions with it.
+Every publish keeps the version before it, up to `KEEP_VERSIONS` (10) per site. A file that did not change between versions is stored once, so ten versions of a game where one script changed cost ten copies of that script, not of the game. `delete_site` takes all versions with it, into the bin.
 
 Hidden files and `node_modules` are left out of an upload. A site needs an `index.html` at the top, and may have its own `404.html`.
+
+## The bin
+
+`delete_site` takes a site offline at once: its link answers 404 from that moment. The site is not erased yet. It moves, with its earlier versions, into a bin for `BIN_DAYS` (30), and the answer says so in plain words:
+
+```text
+delete_site(site="witty-puffin-dd6e1f")
+  in_bin_until: 2026-12-22 16:40 UTC
+  note: witty-puffin-dd6e1f is offline: its link answers 404 from this moment. It is in the bin until 2026-12-22 16:40 UTC.
+        Until then undelete_site with site='witty-puffin-dd6e1f' brings it back, at the same link and with its earlier
+        versions. After 2026-12-22 16:40 UTC it is gone for good and cannot be restored.
+```
+
+- `list_deleted_sites` shows what is in the agent's bin, newest first, with the date each is purged.
+- `undelete_site` brings one back at its old link. `as_site` brings it back under another name instead.
+- After its date a site is no longer offered, and the server removes it within `BIN_PURGE_MINUTES` (and at every start), with a line in the log: `bin: purged <site> for good (...)`. The date is fixed when the site is deleted, so changing `BIN_DAYS` later does not move it.
+- A site an admin took down, with `delete_site` or a take-down link, comes back only by an admin's `undelete_site`. Its owner sees it in the bin, marked `taken_down_by_admin`.
+- A site in the bin does not count towards `MAX_SITES`, but it does take disk, which the dashboard counts.
+
+**Its name stays its owner's while it is in the bin.** Another agent cannot publish under it, so an old link someone shared never opens a stranger's site. The owner can publish under it again at once, and the new site wins: it is live at the link, and the deleted copy stays in the bin as a separate item until its own date. `undelete_site` for a name that has a live site is refused, with two ways out: delete the live one first, or bring the old one back with `as_site`. When the same name is in the bin more than once, `undelete_site` takes the newest; `deleted_id` from `list_deleted_sites` picks another.
+
+**A site that moved can say so.** `delete_site` with `moved_to` (a full `https://` address) makes every old link of the site, on the shared host and on its own host, answer with a 302 to that address and a one-line "This site has moved" page for clients that do not follow redirects. It is a 302, not a 301, because a browser keeps a 301 for good and the owner may bring the site back or publish there again. The redirect lasts until the owner publishes under that name or undeletes the site, also after the bin is emptied, and while it lasts nobody else can take the name. `moved_to` also works for a name whose site is already gone, such as one deleted before the bin existed, if no other agent holds it. It needs an agent key: in danger mode, a site published without one cannot get a redirect, since anyone could then point this domain anywhere.
+
+With `BIN_DAYS=0` there is no bin: a delete is final, the answer says it cannot be restored, and the name is free at once.
 
 ## Admin and moderation
 
@@ -88,7 +116,7 @@ site eager-willow-1ef8cc | anonymous | updated 2026-11-09 21:57 UTC | 1 files, 0
 
 The signals are password fields, forms that send elsewhere, redirects, obfuscation-like calls, downloadable programs and external hosts. The feed has no clock in it, so a watcher can compare it with the last one and only look when something changed.
 
-Each take-down link opens a page with a button. A chat app that previews the link cannot take the site down, and the link stops working when the site changes.
+Each take-down link opens a page with a button. A chat app that previews the link cannot take the site down, and the link stops working when the site changes. A site taken down goes into the bin like any deleted site, and only an admin agent can bring it back.
 
 ### Let a Hermes watch it
 
@@ -160,7 +188,7 @@ The link is signed with the admin keys and works for `DASHBOARD_MINUTES` (60). A
 - **Sites are static.** JavaScript runs in the visitor's browser. There is no server code or database.
 - **Links between files must be relative**, unless `SITE_DOMAIN` is set. A site lives under its own folder, so `/assets/app.js` does not load. `publish_site` warns about this. In Vite, set `base: './'`.
 - **Sites share one origin**, unless `SITE_DOMAIN` is set. `localStorage` works, which games need, and one site can read what another stored there. Nothing secret lives on this origin: no cookies, no sign-ins, and the keys only travel in the `Authorization` header of MCP calls. Do not publish a site that keeps private data in the browser.
-- **Files live in `/data/sites/<name>/`.** Back up that volume. To remove a site by hand, delete its folder.
+- **Files live in `/data/sites/<name>/`**, deleted sites in `/data/bin/` and redirects in `/data/moved/`. Back up that volume. To remove a site by hand, delete its folder; to empty the bin by hand, delete what is in `/data/bin/`.
 
 ## Test
 
