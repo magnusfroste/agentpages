@@ -32,15 +32,21 @@ class Harness(unittest.TestCase):
     EXTRA = {}
 
     @classmethod
+    def prepare(cls, data):
+        """Put something in the data folder before the server starts."""
+
+    @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
+        cls.prepare(cls.tmp.name)
+        cls.log = open(os.path.join(cls.tmp.name, "server.log"), "w")
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             cls.port = s.getsockname()[1]
         cls.base = f"http://127.0.0.1:{cls.port}"
         env = {**os.environ, "DATA_DIR": cls.tmp.name, "PORT": str(cls.port), "MCP_KEYS": f"ada:{KEY},bob:{KEY2},root:{ADMIN},short:abc", "ADMIN_AGENTS": "root,nobody",
                "PUBLIC_URL": "https://pages.example.com", "MAX_SITE_MB": "1", "MAX_FILES": "5", **cls.EXTRA}
-        cls.proc = subprocess.Popen([sys.executable, "server.py"], cwd=APP, env=env, stdout=subprocess.DEVNULL)
+        cls.proc = subprocess.Popen([sys.executable, "server.py"], cwd=APP, env=env, stdout=cls.log)
         for _ in range(100):
             try:
                 urllib.request.urlopen(cls.base + "/health")
@@ -53,7 +59,12 @@ class Harness(unittest.TestCase):
     def tearDownClass(cls):
         cls.proc.terminate()
         cls.proc.wait()
+        cls.log.close()
         cls.tmp.cleanup()
+
+    def server_log(self):
+        with open(os.path.join(self.tmp.name, "server.log")) as f:
+            return f.read()
 
     def http(self, path, headers=None, method="GET"):
         req = urllib.request.Request(self.base + path, headers=headers or {}, method=method)
@@ -282,7 +293,8 @@ class Server(Harness):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
         req = urllib.request.Request(self.base + "/mcp", body, {"Authorization": f"Bearer {KEY}"})
         names = {t["name"] for t in json.load(urllib.request.urlopen(req))["result"]["tools"]}
-        self.assertEqual(names, {"publish_site", "publish_folder", "list_sites", "read_site", "delete_site", "list_versions", "restore_site"})
+        self.assertEqual(names, {"publish_site", "publish_folder", "list_sites", "read_site", "delete_site", "list_versions", "restore_site",
+                                 "list_deleted_sites", "undelete_site"})
 
     def blobs(self, site):
         return len(os.listdir(os.path.join(self.tmp.name, "sites", site, "blobs")))
@@ -318,13 +330,120 @@ class Server(Harness):
         self.assertIn("must be a number", self.refused("restore_site", {"site": s, "version": "latest"}))
         self.assertEqual(self.http(f"/{s}/")[1], b"b")
 
-    def test_deleting_a_site_deletes_its_versions(self):
+    def test_deleting_a_site_takes_its_versions_into_the_bin(self):
         s = self.ok("publish_site", {"site": "gone", "html": "a"})["site"]
         self.ok("publish_site", {"site": s, "html": "b"})
-        self.ok("delete_site", {"site": s})
+        out = self.ok("delete_site", {"site": s})
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "sites", s)))
-        self.ok("publish_site", {"site": s, "html": "new owner, fresh start"}, KEY2)
-        self.assertEqual(self.ok("list_versions", {"site": s}, KEY2)["earlier"], [])
+        binned = os.path.join(self.tmp.name, "bin", out["deleted_id"])
+        self.assertEqual(sorted(os.listdir(os.path.join(binned, "versions"))), ["1.json"])
+        self.assertIn("in the bin", self.refused("publish_site", {"site": s, "html": "someone else"}, KEY2),
+                      "the old link must not land on another agent's site while the owner can still bring it back")
+        self.ok("publish_site", {"site": s, "html": "the owner starts afresh"})
+        self.assertEqual(self.ok("list_versions", {"site": s})["earlier"], [])
+
+    # --- the bin ---------------------------------------------------------------------------------------
+
+    def binned(self, key=KEY):
+        return self.ok("list_deleted_sites", key=key)["deleted_sites"]
+
+    def test_delete_then_404_then_undelete_then_200(self):
+        s = self.ok("publish_site", {"site": "bin-back", "files": {"index.html": "v1", "a.js": "1"}})["site"]
+        live = self.ok("publish_site", {"site": s, "files": {"index.html": "v2", "a.js": "1"}})
+        out = self.ok("delete_site", {"site": s})
+        self.assertEqual(self.http(f"/{s}/")[0], 404, "offline at once")
+        self.assertEqual(self.http(f"/{s}/a.js")[0], 404)
+        self.assertRegex(out["in_bin_until"], r"^\d{4}-\d\d-\d\d \d\d:\d\d UTC$")
+        due = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 30 * 86400))
+        self.assertTrue(out["in_bin_until"].startswith(due), "30 days by default")
+        for words in (f"in the bin until {out['in_bin_until']}", "undelete_site", "gone for good", "cannot be restored"):
+            self.assertIn(words, out["note"], "the response itself says what happens, not only the tool's schema")
+        row = next(r for r in self.binned() if r["site"] == s)
+        self.assertEqual((row["deleted_id"], row["purged"], row["version"], row["taken_down_by_admin"]),
+                         (out["deleted_id"], out["in_bin_until"], 2, False))
+        self.assertNotIn("owner", row)
+        back = self.ok("undelete_site", {"site": s})
+        self.assertEqual((back["url"], back["version"], back["undeleted"]), (live["url"], 2, out["deleted_id"]), "same link")
+        self.assertEqual(self.http(f"/{s}/")[:2], (200, b"v2"))
+        self.assertEqual([v["version"] for v in self.ok("list_versions", {"site": s})["earlier"]], [1], "versions come back too")
+        self.assertNotIn(s, [r["site"] for r in self.binned()])
+        self.assertIn("nothing called", self.refused("undelete_site", {"site": s}))
+
+    def test_only_the_owner_sees_and_undeletes_its_bin(self):
+        s = self.ok("publish_site", {"site": "bin-private", "html": "ada's"})["site"]
+        self.ok("delete_site", {"site": s})
+        self.assertNotIn(s, [r["site"] for r in self.binned(KEY2)])
+        self.assertIn("nothing called", self.refused("undelete_site", {"site": s}, KEY2))
+        self.assertIn("in the bin", self.refused("publish_site", {"site": s, "html": "bob's"}, KEY2))
+        self.ok("undelete_site", {"site": s})
+        self.assertEqual(self.http(f"/{s}/")[1], b"ada's")
+
+    def test_a_new_publish_wins_and_the_old_copy_stays_in_the_bin(self):
+        s = self.ok("publish_site", {"site": "reuse", "html": "old"})["site"]
+        first = self.ok("delete_site", {"site": s})["deleted_id"]
+        self.ok("publish_site", {"site": s, "html": "new"})
+        self.assertEqual(self.http(f"/{s}/")[1], b"new")
+        self.assertIn("has a live site now", self.refused("undelete_site", {"site": s}))
+        self.assertEqual(self.http(f"/{s}/")[1], b"new", "a refused undelete changes nothing")
+        second = self.ok("delete_site", {"site": s})["deleted_id"]
+        self.assertEqual([r["deleted_id"] for r in self.binned() if r["site"] == s], [second, first], "newest first, both kept")
+        self.ok("undelete_site", {"site": s, "deleted_id": first})
+        self.assertEqual(self.http(f"/{s}/")[1], b"old")
+        self.assertIn("reserved", self.refused("undelete_site", {"site": s, "as_site": "mcp"}))
+        moved = self.ok("undelete_site", {"site": s, "as_site": "reuse-new"})
+        self.assertEqual((moved["site"], self.http("/reuse-new/")[1]), ("reuse-new", b"new"), "or under another name")
+        self.assertEqual(self.ok("read_site", {"site": "reuse-new"})["site"], "reuse-new")
+
+    def test_an_admin_take_down_comes_back_only_by_an_admin(self):
+        s = self.ok("publish_site", {"site": "bin-admin", "html": "bob's"}, KEY2)["site"]
+        out = self.ok("delete_site", {"site": s}, ADMIN)
+        self.assertIn("An admin can bring it back", out["note"])
+        mine = next(r for r in self.binned(KEY2) if r["site"] == s)
+        self.assertTrue(mine["taken_down_by_admin"])
+        self.assertIn("Only an admin", self.refused("undelete_site", {"site": s}, KEY2))
+        everyone = {r["site"]: r for r in self.binned(ADMIN)}
+        self.assertEqual(everyone[s]["owner"], "bob")
+        self.assertEqual(self.ok("undelete_site", {"site": s}, ADMIN)["site"], s)
+        self.assertEqual(self.http(f"/{s}/")[1], b"bob's")
+        self.ok("publish_site", {"site": s, "html": "still bob's"}, KEY2)
+
+    def test_a_take_down_link_puts_the_site_in_the_bin(self):
+        s = self.ok("publish_site", {"html": "<h1>bad</h1>"}, KEY2)["site"]
+        link = re.search(rf"(/moderation/takedown/{s}/[0-9a-f]{{32}})", self.feed(ADMIN)[1].decode()).group(1)
+        self.assertIn(b"only an admin agent can bring it back", self.http(link)[1])
+        code, text = self.post(link, b"")
+        self.assertEqual(code, 200)
+        self.assertIn("in the bin until", text)
+        self.assertEqual(self.http(f"/{s}/")[0], 404)
+        self.assertIn("Only an admin", self.refused("undelete_site", {"site": s}, KEY2))
+
+    def test_moved_to_sends_old_links_to_the_new_address(self):
+        s = self.ok("publish_site", {"site": "moved-game", "files": {"index.html": "here", "a.js": "1"}})["site"]
+        self.assertIn("http", self.refused("delete_site", {"site": s, "moved_to": "javascript:alert(1)"}))
+        self.assertEqual(self.http(f"/{s}/")[0], 200, "a refused delete changes nothing")
+        out = self.ok("delete_site", {"site": s, "moved_to": "https://games.example.org/moved-game/"})
+        self.assertIn("redirect to https://games.example.org/moved-game/", out["note"])
+        for path in (f"/{s}/", f"/{s}", f"/{s}/a.js"):
+            code, body, headers = self.http(path)
+            self.assertEqual((code, headers["Location"]), (302, "https://games.example.org/moved-game/"), path)
+            self.assertIn(b'href="https://games.example.org/moved-game/"', body)
+        self.assertIn("belongs to another agent", self.refused("publish_site", {"site": s, "html": "bob's"}, KEY2))
+        self.ok("undelete_site", {"site": s})
+        self.assertEqual(self.http(f"/{s}/")[:2], (200, b"here"), "undelete ends the redirect")
+
+    def test_moved_to_for_a_site_that_is_already_gone(self):
+        out = self.ok("delete_site", {"site": "long-gone", "moved_to": "https://games.example.org/long-gone/"})
+        self.assertIn("no site", out["note"])
+        self.assertEqual(self.http("/long-gone/")[2]["Location"], "https://games.example.org/long-gone/")
+        self.assertIn("another agent", self.refused("delete_site", {"site": "long-gone", "moved_to": "https://evil.example/"}, KEY2))
+        self.assertIn("another agent", self.refused("publish_site", {"site": "long-gone", "html": "x"}, KEY2))
+        self.ok("publish_site", {"site": "long-gone", "html": "back"})
+        self.assertEqual(self.http("/long-gone/")[:2], (200, b"back"), "publishing under the name ends the redirect")
+        self.assertIn("There is no site", self.refused("delete_site", {"site": "never-was"}))
+
+    def test_the_server_says_how_long_the_bin_keeps(self):
+        self.assertIn("bin: deleted sites kept 30 days", self.server_log())
+        self.assertIn(b"waits in a bin for 30 days", self.http("/")[1])
 
     def test_a_folder_is_published_with_one_command(self):
         path = self.upload_path(folder="/opt/data/my game", title="Spelet")
@@ -444,6 +563,15 @@ class DangerMode(Server):
         self.anon("restore_site", {"site": s, "version": 1, "edit_token": token})
         self.assertEqual(self.http(f"/{s}/")[1], b"one")
 
+    def test_moved_to_needs_a_key(self):
+        out = self.anon("publish_site", {"html": "anon"})
+        self.assertIn("needs an agent key", self.refused("delete_site", {"site": out["site"], "edit_token": out["edit_token"],
+                                                                         "moved_to": "https://evil.example/"}, key=None))
+        self.assertIn("needs an agent key", self.refused("delete_site", {"site": "free-name", "moved_to": "https://evil.example/",
+                                                                         "edit_token": out["edit_token"]}, key=None))
+        self.assertEqual(self.http(f"/{out['site']}/")[0], 200)
+        self.assertEqual(self.http("/free-name/")[0], 404)
+
     def test_a_folder_without_a_key(self):
         out = self.anon("publish_folder", {})
         path = re.search(r"(/upload/\S+)$", out["command"]).group(1)
@@ -519,6 +647,13 @@ class SiteDomain(Harness):
         self.assertEqual(self.on("a.real")[0], 404, "one label only, as a wildcard certificate means it")
         self.assertEqual(self.http("/", {"Host": "pages.example.com"})[0], 200, "the server's own address is the home page")
 
+    def test_a_moved_site_redirects_from_its_own_host_too(self):
+        self.ok("publish_site", {"site": "moved-host", "html": "r"})
+        self.ok("delete_site", {"site": "moved-host", "moved_to": "https://games.example.org/"})
+        code, _, headers = self.on("moved-host")
+        self.assertEqual((code, headers["Location"]), (302, "https://games.example.org/"), "3xx, so the certificate check still passes")
+        self.assertEqual(self.on("nosuchsite")[0], 404)
+
     def test_a_site_host_serves_that_site_and_nothing_else(self):
         self.ok("publish_site", {"site": "one", "html": "1"})
         self.ok("publish_site", {"site": "two", "html": "2"})
@@ -544,6 +679,89 @@ class SiteDomain(Harness):
 
     def test_www_is_not_a_site_name(self):
         self.assertIn("reserved", self.refused("publish_site", {"html": "x", "site": "www"}))
+
+
+class NoBin(Harness):
+    """BIN_DAYS=0: a delete is final, as before the bin, and says so."""
+    EXTRA = {"BIN_DAYS": "0"}
+
+    def test_a_delete_is_final_and_says_so(self):
+        s = self.ok("publish_site", {"site": "no-bin", "html": "x"})["site"]
+        out = self.ok("delete_site", {"site": s})
+        self.assertIn("cannot be restored", out["note"])
+        self.assertNotIn("in_bin_until", out)
+        self.assertEqual(os.listdir(os.path.join(self.tmp.name, "bin")), [])
+        self.assertEqual(self.ok("list_deleted_sites")["deleted_sites"], [])
+        self.ok("publish_site", {"site": s, "html": "free at once"}, KEY2)
+        tool = next(t for t in self.rpc_list() if t["name"] == "delete_site")
+        self.assertIn("cannot be restored", tool["description"])
+
+    def rpc_list(self):
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+        req = urllib.request.Request(self.base + "/mcp", body, {"Authorization": f"Bearer {KEY}"})
+        return json.load(urllib.request.urlopen(req))["result"]["tools"]
+
+
+def store_at(data, clock, bin_days=30):
+    sys.path.insert(0, APP)
+    from store import Store
+    return Store(data, 1048576, 10, 10, bin_days=bin_days, clock=lambda: clock[0])
+
+
+class BinPurge(unittest.TestCase):
+    """The bin empties itself after BIN_DAYS. A clock of our own, so nothing sleeps."""
+    DAY = 86400
+
+    def test_a_deleted_site_is_purged_after_its_date_and_not_before(self):
+        clock = [1_800_000_000]
+        with tempfile.TemporaryDirectory() as data:
+            store = store_at(data, clock)
+            store.publish({"index.html": b"a"}, "ada", name="old-game")
+            rec = store.delete("old-game", "ada", by="ada")
+            self.assertEqual(rec["purge_at"], clock[0] + 30 * self.DAY)
+            clock[0] += 30 * self.DAY - 1
+            self.assertEqual(store.purge(), [])
+            self.assertEqual([r["id"] for r in store.binned("ada")], [rec["id"]])
+            clock[0] += 1
+            self.assertEqual(store.binned("ada"), [], "past its date it is not offered, even before the purge runs")
+            with self.assertRaisesRegex(ValueError, "gone for good"):
+                store.undelete("old-game", "ada")
+            self.assertEqual([r["id"] for r in store.purge()], [rec["id"]])
+            self.assertEqual(os.listdir(os.path.join(data, "bin")), [])
+            store.publish({"index.html": b"b"}, "bob", name="old-game")  # the name is free again
+
+    def test_the_date_given_holds_when_bin_days_changes(self):
+        clock = [1_800_000_000]
+        with tempfile.TemporaryDirectory() as data:
+            store_at(data, clock).publish({"index.html": b"a"}, "ada", name="kept")
+            rec = store_at(data, clock).delete("kept", "ada")
+            clock[0] += 10 * self.DAY
+            shorter = store_at(data, clock, bin_days=5)
+            self.assertEqual(shorter.purge(), [])
+            meta, _ = shorter.undelete("kept", "ada")
+            self.assertEqual((meta["name"], shorter.read("kept", "index.html")[0]), ("kept", b"a"))
+            self.assertEqual(rec["purge_at"], 1_800_000_000 + 30 * self.DAY)
+
+
+class PurgeAtStartup(Harness):
+    """What is past its date when the server starts is purged then, and the purge is logged."""
+
+    @classmethod
+    def prepare(cls, data):
+        then = [time.time() - 31 * 86400]
+        old = store_at(data, then)
+        old.publish({"index.html": b"old"}, "ada", name="expired-game")
+        old.delete("expired-game", "ada", by="ada")
+        recent = [time.time() - 86400]
+        new = store_at(data, recent)
+        new.publish({"index.html": b"new"}, "ada", name="recent-game")
+        new.delete("recent-game", "ada", by="ada")
+
+    def test_the_expired_one_is_gone_and_logged(self):
+        self.assertEqual([r["site"] for r in self.ok("list_deleted_sites")["deleted_sites"]], ["recent-game"])
+        self.assertEqual([d.split(".")[0] for d in os.listdir(os.path.join(self.tmp.name, "bin"))], ["recent-game"])
+        self.assertRegex(self.server_log(), r"bin: purged expired-game for good \(expired-game\.\d+\.[0-9a-f]{8}, deleted .* by ada")
+        self.assertIn("gone for good", self.refused("undelete_site", {"site": "expired-game"}))
 
 
 class LegacySites(unittest.TestCase):

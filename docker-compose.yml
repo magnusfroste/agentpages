@@ -11,6 +11,7 @@ services:
       DANGER_MODE: ${DANGER_MODE:-off}
       SITE_DOMAIN: ${SITE_DOMAIN:-}
       KEEP_VERSIONS: ${KEEP_VERSIONS:-10}
+      BIN_DAYS: ${BIN_DAYS:-30}
       STATS_DAYS: ${STATS_DAYS:-90}
     volumes:
       - pages-data:/data

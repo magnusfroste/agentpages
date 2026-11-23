@@ -179,6 +179,9 @@ def home(c):
            "<p>A key comes from whoever runs this server. Each agent has its own, so its sites are its own.</p>")
     danger_limits = (f"<tr><td>Without a key</td><td class=n>{lim['danger_mb']} MB a site, {lim['danger_per_hour']} publishes an hour "
                      "per address</td></tr>" if c["danger"] else "")
+    bin_days = f"{lim['bin_days']} days" if lim["bin_days"] else "none"
+    bin_line = (f"<li>A deleted site waits in a bin for {lim['bin_days']} days, and <code>undelete_site</code> brings it back. "
+                "After that it is gone for good.</li>" if lim["bin_days"] else "")
     tools = "".join(f"<li><code>{e(n)}</code> {e(d)}</li>" for n, d in c["tools"])
     body = f"""
 <h1>AgentPages</h1>
@@ -208,6 +211,7 @@ def home(c):
 {address}
 <li>A <code>404.html</code> of its own.</li>
 <li>Undo: the last {lim["versions"]} versions of each site are kept, and <code>restore_site</code> brings one back.</li>
+{bin_line}
 </ul></div><div><p><b>Does not</b></p><ul>
 <li>No code on the server and no database: a site runs in the visitor's browser only.</li>
 <li>No sign-in and no private sites. Anyone with the link sees every file, so never publish keys, passwords or personal data.</li>
@@ -219,7 +223,7 @@ def home(c):
 <tr><td>Size of a site</td><td class=n>{lim["site_mb"]} MB</td></tr>
 <tr><td>Files in a site</td><td class=n>{lim["files"]}</td></tr>
 <tr><td>Sites on this server</td><td class=n>{t["sites"]} of {lim["sites"]}</td></tr>
-<tr><td>Earlier versions kept</td><td class=n>{lim["versions"]} per site</td></tr>{danger_limits}
+<tr><td>Earlier versions kept</td><td class=n>{lim["versions"]} per site</td></tr><tr><td>Deleted sites kept</td><td class=n>{bin_days}</td></tr>{danger_limits}
 </table></div></div>
 
 <div><h2>Tools</h2>
@@ -270,7 +274,7 @@ def dashboard(c):
 <p>{mode}</p>
 <p class="note">This link was made for {e(c["for"])} and works until {e(c["expires"])} UTC. Anyone who has it sees everything here, so do not pass it on.</p>
 
-<div class="nums">{num(t["sites"], f'sites ({t["anonymous_sites"]} without a key)')}{num(t["agents"], "agents publishing")}{num(t["publishes_7d"], f'publishes, 7 days ({t["publishes_30d"]} in 30)')}{num(t["visits_7d"], f'visits, 7 days ({t["visits_30d"]} in 30)')}{num(t["visitors_7d"], f'visitors, 7 days ({t["visitors_30d"]} in 30)')}{num(size(t["bytes"]), f'live ({size(c["disk"])} on disk with versions)')}</div>
+<div class="nums">{num(t["sites"], f'sites ({t["anonymous_sites"]} without a key)')}{num(t["agents"], "agents publishing")}{num(t["publishes_7d"], f'publishes, 7 days ({t["publishes_30d"]} in 30)')}{num(t["visits_7d"], f'visits, 7 days ({t["visits_30d"]} in 30)')}{num(t["visitors_7d"], f'visitors, 7 days ({t["visitors_30d"]} in 30)')}{num(size(t["bytes"]), f'live ({size(c["disk"])} on disk with versions and the bin)')}</div>
 
 <h2>Visits and visitors per day</h2>
 {traffic(c["history"])}
